@@ -260,26 +260,36 @@ local function equipSelectedVFX(abilityName, vfxCard)
 	return false
 end
 
-local function styleVFXCard(vfxCard)
-	vfxCard.BackgroundTransparency = 1
+local function setupNavigate()
+	-- Keep the same Navigate kit as Rewards/Store (scale padding = even gaps between tabs)
+	navigate.Size = UDim2.new(0.250015765, 0, 0.100123651, 0)
+	navigate.Position = UDim2.new(0.5, 0, -0.048, 0)
+	navigate.AnchorPoint = Vector2.new(0.5, 0.5)
+	navigate.BackgroundTransparency = 1
 
-	local img = vfxCard:FindFirstChild("ImageLabel")
-	if img and img:IsA("ImageLabel") then
-		img.Size = UDim2.fromScale(0.43, 0.9)
-		img.Position = UDim2.fromScale(0.545, 0.5)
-		img.AnchorPoint = Vector2.new(0.5, 0.5)
+	local layout = navigate:FindFirstChildOfClass("UIListLayout")
+	if not layout then
+		layout = Instance.new("UIListLayout")
+		layout.Parent = navigate
+	end
+	layout.FillDirection = Enum.FillDirection.Vertical
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	layout.Padding = UDim.new(0.2, 0)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Wraps = true
+
+	local tabOrder = { Ability = 1, DASH = 2, DEATH = 3 }
+	for name, button in pairs(tabButtons) do
+		button.Size = UDim2.new(0.801111817, 0, 1, 0)
+		button.AnchorPoint = Vector2.new(0, 0)
+		button.LayoutOrder = tabOrder[name] or 0
 	end
 
-	for _, grad in ipairs(vfxCard:GetDescendants()) do
-		if grad:IsA("UIGradient") and grad.Name == "Common" then
-			grad.Enabled = false
-		end
-	end
-
-	local innerFrame = vfxCard:FindFirstChild("Frame")
-	if innerFrame and innerFrame:IsA("Frame") then
-		innerFrame.BackgroundTransparency = 0.35
-		innerFrame.BackgroundColor3 = Color3.fromRGB(38, 41, 52)
+	if closeBtn and closeBtn:IsA("GuiObject") then
+		closeBtn.AnchorPoint = Vector2.new(1, 0.5)
+		closeBtn.Position = UDim2.new(0.985, 0, 0.5, 0)
+		closeBtn.Size = UDim2.new(0.055, 0, 0.62, 0)
 	end
 end
 
@@ -308,7 +318,6 @@ local function bindVFXCards()
 		vfxCardsByPane[paneName] = cards
 
 		for _, vfxCard in ipairs(cards) do
-			styleVFXCard(vfxCard)
 
 			local playBtn = vfxCard:FindFirstChild("Play")
 			local buyBtn = vfxCard:FindFirstChild("Buy")
@@ -370,6 +379,7 @@ local function buildAbilityGrid()
 		card.Activated:Connect(function()
 			selectAbility(abilityName)
 		end)
+		UIHelpers.bindButtonHover(card)
 
 		abilityCards[abilityName] = card
 	end
@@ -394,42 +404,48 @@ local function setTab(tabName)
 	end
 
 	for name, button in pairs(tabButtons) do
+		local active = name == tabName
+		-- Match Ability kit: white face + white extruded Frame
+		button.BackgroundColor3 = active and Color3.new(1, 1, 1) or Color3.fromRGB(76, 78, 99)
 		local frame = button:FindFirstChild("Frame")
 		if frame then
-			frame.BackgroundTransparency = name == tabName and 0 or 0.35
+			frame.BackgroundColor3 = Color3.new(1, 1, 1)
+			frame.BackgroundTransparency = active and 0 or 0.35
 		end
 	end
 end
 
+local function canShowLobbyPanel()
+	if localPlayer:GetAttribute("InPractice") == true then
+		return true
+	end
+	if localPlayer:GetAttribute("InArena") ~= true then
+		return true
+	end
+	if localPlayer:GetAttribute("IsEliminated") == true then
+		return true
+	end
+	return false
+end
+
 local function setLoadoutVisible(isVisible, tabName)
-	if localPlayer:GetAttribute("InArena") == true then
-		loadoutFrame.Visible = false
+	if isVisible and not canShowLobbyPanel() then
 		return
 	end
 
 	if isVisible then
 		setTab(tabName or "Ability")
-	elseif tabName == "Close" then
-		-- closing
-	end
-
-	loadoutFrame.Visible = isVisible
-	if isVisible then
-		loadoutFrame.Position = UDim2.new(0.5, 0, 0.56, 0)
-		loadoutFrame:TweenPosition(
-			UDim2.new(0.5, 0, 0.5, 0),
-			Enum.EasingDirection.Out,
-			Enum.EasingStyle.Back,
-			0.35,
-			true
-		)
+		UIHelpers.animatePanelOpen(loadoutFrame)
 		if selectedAbility then
 			selectAbility(selectedAbility)
 		end
+	else
+		UIHelpers.animatePanelClose(loadoutFrame)
 	end
 end
 
 bindVFXCards()
+setupNavigate()
 buildAbilityGrid()
 
 local preferred = localPlayer:GetAttribute("EquippedAbility")
@@ -477,6 +493,10 @@ localPlayer:GetAttributeChangedSignal("InArena"):Connect(function()
 		setLoadoutVisible(false)
 	end
 end)
+
+UIHelpers.bindHoversUnder(navigate)
+UIHelpers.bindButtonHover(closeBtn)
+UIHelpers.bindHoversUnder(abilityFrame)
 
 loadoutFrame.Visible = false
 setTab("Ability")

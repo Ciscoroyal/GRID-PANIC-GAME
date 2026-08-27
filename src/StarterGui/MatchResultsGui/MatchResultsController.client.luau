@@ -172,16 +172,48 @@ local function showResults(data)
 	local isSpectator = viewMode ~= "participant"
 	local winnerUserId = data.winnerUserId or 0
 	local winnerDisplayName = data.winnerName or "Unknown"
+	local winnerIsTeam = data.winnerIsTeam == true
+	local winningTeam = data.winningTeam
+	local winnerIsJuggernaut = data.winnerIsJuggernaut == true
 
 	winnerText.Text = "WINNER"
 	if winnerName then
 		winnerName.Text = winnerDisplayName
 		winnerName.Visible = true
+		if winnerIsTeam then
+			if winningTeam == "Blue" then
+				winnerName.TextColor3 = Color3.fromRGB(80, 160, 255)
+			elseif winningTeam == "Red" then
+				winnerName.TextColor3 = Color3.fromRGB(255, 80, 80)
+			elseif winningTeam == "Survivors" then
+				winnerName.TextColor3 = Color3.fromRGB(120, 220, 140)
+			else
+				winnerName.TextColor3 = Color3.new(1, 1, 1)
+			end
+		elseif winnerIsJuggernaut then
+			winnerName.TextColor3 = Color3.fromRGB(255, 200, 60)
+		else
+			winnerName.TextColor3 = Color3.new(1, 1, 1)
+		end
 	end
 
-	if winnerUserId > 0 then
+	if winnerIsTeam then
+		winnerAvatar.Image = ""
+		winnerAvatar.BackgroundTransparency = 0.15
+		if winningTeam == "Blue" then
+			winnerAvatar.BackgroundColor3 = Color3.fromRGB(40, 110, 220)
+		elseif winningTeam == "Red" then
+			winnerAvatar.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+		elseif winningTeam == "Survivors" then
+			winnerAvatar.BackgroundColor3 = Color3.fromRGB(40, 140, 70)
+		else
+			winnerAvatar.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+		end
+	elseif winnerUserId > 0 then
+		winnerAvatar.BackgroundTransparency = 1
 		UIHelpers.setAvatarImage(winnerAvatar, winnerUserId)
 	else
+		winnerAvatar.BackgroundTransparency = 1
 		winnerAvatar.Image = ""
 	end
 

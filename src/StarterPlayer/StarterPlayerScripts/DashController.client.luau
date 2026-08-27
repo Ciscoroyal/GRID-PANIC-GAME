@@ -5,17 +5,18 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
 
 local PlayerSettings = require(ReplicatedStorage:WaitForChild("PlayerSettings"))
+local DashCollision = require(ReplicatedStorage:WaitForChild("DashCollision"))
+local dashQuestEvent = ReplicatedStorage:WaitForChild("DashQuestEvent", 10)
 
 local player = Players.LocalPlayer
 PlayerSettings.ensure(player)
 
 local DASH_COOLDOWN = 0.75
-local DASH_DISTANCE = 10
+local DASH_DISTANCE = 15
 local DASH_DURATION = 0.45
 
 local isDashing = false
 local lastDashTime = 0
-local activeDashTween = nil
 local dashFinishToken = 0
 local dashCooldownLoopActive = false
 local boundDashButton = nil
@@ -35,11 +36,22 @@ local function getDashAnimObject()
 	return script:FindFirstChild("DashAnim") or script.Parent:FindFirstChild("DashAnim")
 end
 
-local function stopMovementAnimations(animator)
+local function stopCompetingAnimations(animator, keepTrack)
+	if not animator then
+		return
+	end
 	for _, track in animator:GetPlayingAnimationTracks() do
-		if track.Priority == Enum.AnimationPriority.Movement then
-			track:Stop(0.1)
+		if track ~= keepTrack then
+			track:AdjustWeight(0, 0)
+			track:Stop(0)
 		end
+	end
+end
+
+local function setLocomotionEnabled(character, enabled)
+	local animate = character and character:FindFirstChild("Animate")
+	if animate and (animate:IsA("LocalScript") or animate:IsA("Script")) then
+		animate.Disabled = not enabled
 	end
 end
 
@@ -57,10 +69,8 @@ end
 
 local function playDashAnimation(animator)
 	if not animator then
-		return
+		return nil, DASH_DURATION
 	end
-
-	stopMovementAnimations(animator)
 
 	local track = dashTrack
 	if not track then
@@ -73,18 +83,19 @@ local function playDashAnimation(animator)
 		end
 	end
 
+	stopCompetingAnimations(animator, track)
+
 	if track then
 		track:Stop(0)
 		track:AdjustSpeed(1)
-		track:Play(0.05)
+		track:Play(0, 1, 1)
+		local animLength = track.Length
+		if animLength and animLength > 0 then
+			return track, math.max(DASH_DURATION, animLength)
+		end
 	end
-end
 
-local function cancelDashTween()
-	if activeDashTween then
-		activeDashTween:Cancel()
-		activeDashTween = nil
-	end
+	return track, DASH_DURATION
 end
 
 local function stopDashAnimation()
@@ -93,11 +104,46 @@ local function stopDashAnimation()
 	end
 end
 
+local function cancelActiveDash()
+	local character = player.Character
+	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+	if rootPart then
+		DashCollision.cancel(rootPart)
+	end
+end
+
+local function restoreHumanoidMovement(character)
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+
+	local defaultSpeed = game:GetService("StarterPlayer").CharacterWalkSpeed
+	if typeof(defaultSpeed) ~= "number" or defaultSpeed <= 0 then
+		defaultSpeed = 16
+	end
+
+	humanoid.WalkSpeed = defaultSpeed
+	humanoid.AutoRotate = true
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.Running, true)
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.RunningNoPhysics, true)
+	pcall(function()
+		humanoid.PlatformStand = false
+		humanoid.Sit = false
+	end)
+end
+
 local function resetDashState()
 	dashFinishToken += 1
 	isDashing = false
-	cancelDashTween()
+	cancelActiveDash()
 	stopDashAnimation()
+	local character = player.Character
+	if character then
+		setLocomotionEnabled(character, true)
+		-- Cancelling finishDash skips its WalkSpeed/AutoRotate restore — apply it here.
+		restoreHumanoidMovement(character)
+	end
 end
 
 local function getDashCooldownRemaining()
@@ -161,16 +207,21 @@ local function performDash(directionVector)
 	end
 
 	dashFinishToken += 1
-	cancelDashTween()
+	cancelActiveDash()
 
 	isDashing = true
 	lastDashTime = currentTime
 	local finishToken = dashFinishToken
 	refreshDashButton()
 	startDashCooldownLoop()
+	if dashQuestEvent and player:GetAttribute("InArena") == true and player:GetAttribute("IsEliminated") ~= true then
+		dashQuestEvent:FireServer()
+	end
 
 	local animator = humanoid:FindFirstChildOfClass("Animator")
-	playDashAnimation(animator)
+	-- Physics dash makes Animate play run even from standstill; mute until dash anim ends.
+	setLocomotionEnabled(character, false)
+	local _, muteFor = playDashAnimation(animator)
 
 	local dashVelocity = (rootPart.CFrame.RightVector * directionVector.X) + (rootPart.CFrame.LookVector * directionVector.Z)
 	dashVelocity = Vector3.new(dashVelocity.X, 0, dashVelocity.Z)
@@ -178,16 +229,6 @@ local function performDash(directionVector)
 		dashVelocity = Vector3.new(rootPart.CFrame.LookVector.X, 0, rootPart.CFrame.LookVector.Z)
 	end
 	dashVelocity = dashVelocity.Unit
-	local startPos = rootPart.Position
-	local newPos = startPos + (dashVelocity * DASH_DISTANCE)
-	newPos = Vector3.new(newPos.X, startPos.Y, newPos.Z)
-	local look = Vector3.new(rootPart.CFrame.LookVector.X, 0, rootPart.CFrame.LookVector.Z)
-	if look.Magnitude < 0.001 then
-		look = dashVelocity
-	else
-		look = look.Unit
-	end
-	local targetCFrame = CFrame.new(newPos, newPos + look)
 
 	local gameAssets = ReplicatedStorage:FindFirstChild("GameAssets")
 	if PlayerSettings.isSFXEnabled() and gameAssets and gameAssets:FindFirstChild("Sounds") then
@@ -237,9 +278,19 @@ local function performDash(directionVector)
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.Running, false)
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.RunningNoPhysics, false)
 
-	local dashTween = TweenService:Create(rootPart, TweenInfo.new(DASH_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {CFrame = targetCFrame})
-	activeDashTween = dashTween
-	dashTween:Play()
+	DashCollision.applyPhysicsDash(rootPart, dashVelocity, DASH_DISTANCE, DASH_DURATION)
+
+	-- Keep only the dash clip visible for the full animation window.
+	task.spawn(function()
+		local endAt = os.clock() + muteFor
+		while os.clock() < endAt and finishToken == dashFinishToken do
+			stopCompetingAnimations(animator, dashTrack)
+			task.wait()
+		end
+		if finishToken == dashFinishToken and character.Parent then
+			setLocomotionEnabled(character, true)
+		end
+	end)
 
 	local function finishDash()
 		if finishToken ~= dashFinishToken then
@@ -254,11 +305,9 @@ local function performDash(directionVector)
 		end
 
 		isDashing = false
-		cancelDashTween()
 	end
 
-	dashTween.Completed:Connect(finishDash)
-	task.delay(DASH_DURATION + 0.15, finishDash)
+	task.delay(DASH_DURATION, finishDash)
 end
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)

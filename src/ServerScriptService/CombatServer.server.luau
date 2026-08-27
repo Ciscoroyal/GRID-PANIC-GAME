@@ -8,8 +8,21 @@ local QuestService = require(ServerScriptService:WaitForChild("QuestService"))
 local useAbilityEvent = ReplicatedStorage:WaitForChild("UseAbilityEvent")
 local abilityData = require(ReplicatedStorage:WaitForChild("AbilityData"))
 local vfxEvent = ReplicatedStorage:WaitForChild("VFXEvent")
+local combatAnimEvent = ReplicatedStorage:WaitForChild("CombatAnimEvent")
 local ownedDataStore = DataStoreService:GetDataStore("OwnedAbilities_V1")
 local TILE_DISTANCE = 20
+local JUGGERNAUT_INCOMING_MULT = 0.5 -- half a tile vs juggernaut
+local JUGGERNAUT_OUTGOING_MULT = 1.75 -- juggernaut punches hit harder
+
+local function getKnockbackDistance(attacker, targetPlayer, baseDistance)
+	local distance = baseDistance
+	if targetPlayer and targetPlayer:GetAttribute("IsJuggernaut") == true then
+		distance = baseDistance * JUGGERNAUT_INCOMING_MULT
+	elseif attacker and attacker:GetAttribute("IsJuggernaut") == true then
+		distance = baseDistance * JUGGERNAUT_OUTGOING_MULT
+	end
+	return distance
+end
 
 local function attributeCombatHit(attacker, targetChar)
 	local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
@@ -212,13 +225,27 @@ useAbilityEvent.OnServerEvent:Connect(function(player, abilityRequested)
 	if player:GetAttribute("InArena") ~= true then
 		return
 	end
+	local modeValue = ReplicatedStorage:FindFirstChild("CurrentGameMode")
+	local modeId = modeValue and modeValue.Value or ""
+	-- Pure Survival: abilities disabled (dash still works — it's separate)
+	if modeId == "PureSurvival" then
+		return
+	end
+	-- Punch Out: everyone uses Grid Punch only
+	if modeId == "PunchOut" then
+		abilityRequested = "Grid Punch"
+	else
+		if not abilityData[abilityRequested] then
+			return
+		end
+		if player:GetAttribute("EquippedAbility") ~= abilityRequested then
+			return
+		end
+		if not ownsAbility(player, abilityRequested) then
+			return
+		end
+	end
 	if not abilityData[abilityRequested] then
-		return
-	end
-	if player:GetAttribute("EquippedAbility") ~= abilityRequested then
-		return
-	end
-	if not ownsAbility(player, abilityRequested) then
 		return
 	end
 	if isAbilityOnCooldown(player) then
@@ -234,6 +261,7 @@ useAbilityEvent.OnServerEvent:Connect(function(player, abilityRequested)
 		if targetChar then
 			local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
 			if targetPlayer and targetPlayer:GetAttribute("HasShield") == true then
+				combatAnimEvent:FireAllClients("GridPunch", player.UserId)
 				startAbilityCooldown(player, abilityRequested)
 				targetPlayer:SetAttribute("HasShield", nil)
 				local shieldVis = targetChar:FindFirstChild("ShieldVisual")
@@ -242,6 +270,7 @@ useAbilityEvent.OnServerEvent:Connect(function(player, abilityRequested)
 				return
 			end
 		end
+		combatAnimEvent:FireAllClients("GridPunch", player.UserId)
 		beginAbilityUse(player, abilityRequested)
 		if targetChar then
 			local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
@@ -252,17 +281,19 @@ useAbilityEvent.OnServerEvent:Connect(function(player, abilityRequested)
 			end
 			local targetRoot = targetChar.HumanoidRootPart
 			local pushDirection = character.HumanoidRootPart.CFrame.LookVector
-			tweenKnockback(targetRoot, pushDirection, TILE_DISTANCE)
+			local targetPlayerForKb = Players:GetPlayerFromCharacter(targetChar)
+			tweenKnockback(targetRoot, pushDirection, getKnockbackDistance(player, targetPlayerForKb, TILE_DISTANCE))
 		else
 		end
 		-- =======================================
 		-- ABILITY: DASH STRIKE
 		-- =======================================
 	elseif abilityRequested == "Dash Strike" then
-		local targetChar = getTargetInFront(character, 15)
+		local targetChar = getTargetInFront(character, 30)
 		if targetChar then
 			local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
 			if targetPlayer and targetPlayer:GetAttribute("HasShield") == true then
+				combatAnimEvent:FireAllClients("DashStrike", player.UserId)
 				startAbilityCooldown(player, abilityRequested)
 				targetPlayer:SetAttribute("HasShield", nil)
 				local shieldVis = targetChar:FindFirstChild("ShieldVisual")
@@ -271,6 +302,7 @@ useAbilityEvent.OnServerEvent:Connect(function(player, abilityRequested)
 				return
 			end
 		end
+		combatAnimEvent:FireAllClients("DashStrike", player.UserId)
 		startAbilityCooldown(player, abilityRequested)
 		if targetChar then
 			local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
@@ -281,7 +313,8 @@ useAbilityEvent.OnServerEvent:Connect(function(player, abilityRequested)
 			end
 			local targetRoot = targetChar.HumanoidRootPart
 			local pushDirection = character.HumanoidRootPart.CFrame.LookVector
-			tweenKnockback(targetRoot, pushDirection, TILE_DISTANCE)
+			local targetPlayerForKb = Players:GetPlayerFromCharacter(targetChar)
+			tweenKnockback(targetRoot, pushDirection, getKnockbackDistance(player, targetPlayerForKb, TILE_DISTANCE))
 		else
 		end
 		elseif abilityRequested == "Proximity Mine" then
@@ -324,7 +357,9 @@ useAbilityEvent.OnServerEvent:Connect(function(player, abilityRequested)
 						randomX = math.random(-2, 2) * TILE_DISTANCE
 						randomZ = math.random(-2, 2) * TILE_DISTANCE
 					end
-					local minePush = Vector3.new(randomX, 0, randomZ); tweenKnockback(targetRoot, minePush, minePush.Magnitude)
+					local minePush = Vector3.new(randomX, 0, randomZ)
+					local mineDist = getKnockbackDistance(player, targetPlayer, minePush.Magnitude)
+					tweenKnockback(targetRoot, minePush, mineDist)
 					task.wait(0.2)
 					mine:Destroy()
 				end
@@ -336,6 +371,7 @@ useAbilityEvent.OnServerEvent:Connect(function(player, abilityRequested)
 		-- =======================================
 	elseif abilityRequested == "Shield Bubble" then
 		if player:GetAttribute("HasShield") == true then return end
+		combatAnimEvent:FireAllClients("ShieldBubble", player.UserId)
 		startAbilityCooldown(player, abilityRequested)
 		player:SetAttribute("HasShield", true)
 		local shield = Instance.new("Part")
@@ -364,51 +400,74 @@ useAbilityEvent.OnServerEvent:Connect(function(player, abilityRequested)
 		-- ABILITY: SHOCKWAVE
 		-- =======================================
 	elseif abilityRequested == "Shockwave" then
+		-- Anim is ~0.45s; ground impact lands near the end of the slam
+		local SHOCKWAVE_IMPACT_DELAY = 0.3
+		local SHOCKWAVE_RANGE = 18
+		local SHOCKWAVE_PUSH = TILE_DISTANCE * 0.5 -- half a tile (10)
+
+		combatAnimEvent:FireAllClients("Shockwave", player.UserId)
 		startAbilityCooldown(player, abilityRequested)
-		vfxEvent:FireAllClients("HeavyShake")
-		local rootPos = character.HumanoidRootPart.Position
-		local SHOCKWAVE_RANGE = 18 
-		local wave = Instance.new("Part")
-		wave.Name = "ShockwaveVisual"
-		wave.Shape = Enum.PartType.Ball
-		wave.Size = Vector3.new(2, 2, 2)
-		wave.Position = rootPos
-		wave.Color = Color3.fromRGB(200, 255, 255) 
-		wave.Material = Enum.Material.Neon
-		wave.Anchored = true
-		wave.CanCollide = false
-		wave.Parent = workspace
-		local waveTweenInfo = TweenInfo.new(0.35, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
-		local waveTween = TweenService:Create(wave, waveTweenInfo, {
-			Size = Vector3.new(SHOCKWAVE_RANGE * 2, SHOCKWAVE_RANGE * 2, SHOCKWAVE_RANGE * 2),
-			Transparency = 1
-		})
-		waveTween:Play()
-		game:GetService("Debris"):AddItem(wave, 0.4) 
-		for _, otherPlayer in ipairs(Players:GetPlayers()) do
-			if otherPlayer ~= player and otherPlayer:GetAttribute("InArena") == true and otherPlayer.Character then
-				local targetRoot = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
-				if targetRoot then
-					local targetPos = targetRoot.Position
-					local flatRoot = Vector3.new(rootPos.X, 0, rootPos.Z)
-					local flatTarget = Vector3.new(targetPos.X, 0, targetPos.Z)
-					local distance = (flatTarget - flatRoot).Magnitude
-					if distance <= SHOCKWAVE_RANGE then
-						if otherPlayer:GetAttribute("HasShield") == true then
-							otherPlayer:SetAttribute("HasShield", nil)
-							local shieldVis = otherPlayer.Character:FindFirstChild("ShieldVisual")
-							if shieldVis then shieldVis:Destroy() end
-						else
-							KillFeedService.attributeHit(otherPlayer, player)
-							local pushDirection = (flatTarget - flatRoot).Unit
-							if distance < 0.1 then 
-								pushDirection = character.HumanoidRootPart.CFrame.LookVector 
+
+		local casterRoot = character:FindFirstChild("HumanoidRootPart")
+		if not casterRoot then
+			return
+		end
+
+		task.delay(SHOCKWAVE_IMPACT_DELAY, function()
+			if not player.Parent or not character.Parent then
+				return
+			end
+			local root = character:FindFirstChild("HumanoidRootPart") or casterRoot
+			if not root or not root.Parent then
+				return
+			end
+
+			local rootPos = root.Position
+			vfxEvent:FireAllClients("HeavyShake")
+
+			local wave = Instance.new("Part")
+			wave.Name = "ShockwaveVisual"
+			wave.Shape = Enum.PartType.Ball
+			wave.Size = Vector3.new(2, 2, 2)
+			wave.Position = rootPos
+			wave.Color = Color3.fromRGB(200, 255, 255)
+			wave.Material = Enum.Material.Neon
+			wave.Anchored = true
+			wave.CanCollide = false
+			wave.Parent = workspace
+			local waveTweenInfo = TweenInfo.new(0.35, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+			local waveTween = TweenService:Create(wave, waveTweenInfo, {
+				Size = Vector3.new(SHOCKWAVE_RANGE * 2, SHOCKWAVE_RANGE * 2, SHOCKWAVE_RANGE * 2),
+				Transparency = 1
+			})
+			waveTween:Play()
+			game:GetService("Debris"):AddItem(wave, 0.4)
+
+			for _, otherPlayer in ipairs(Players:GetPlayers()) do
+				if otherPlayer ~= player and otherPlayer:GetAttribute("InArena") == true and otherPlayer.Character then
+					local targetRoot = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
+					if targetRoot then
+						local targetPos = targetRoot.Position
+						local flatRoot = Vector3.new(rootPos.X, 0, rootPos.Z)
+						local flatTarget = Vector3.new(targetPos.X, 0, targetPos.Z)
+						local distance = (flatTarget - flatRoot).Magnitude
+						if distance <= SHOCKWAVE_RANGE then
+							if otherPlayer:GetAttribute("HasShield") == true then
+								otherPlayer:SetAttribute("HasShield", nil)
+								local shieldVis = otherPlayer.Character:FindFirstChild("ShieldVisual")
+								if shieldVis then shieldVis:Destroy() end
+							else
+								KillFeedService.attributeHit(otherPlayer, player)
+								local pushDirection = (flatTarget - flatRoot).Unit
+								if distance < 0.1 then
+									pushDirection = root.CFrame.LookVector
+								end
+								tweenKnockback(targetRoot, pushDirection, getKnockbackDistance(player, otherPlayer, SHOCKWAVE_PUSH))
 							end
-							tweenKnockback(targetRoot, pushDirection, TILE_DISTANCE)
 						end
 					end
 				end
 			end
-		end
+		end)
 	end
 end)

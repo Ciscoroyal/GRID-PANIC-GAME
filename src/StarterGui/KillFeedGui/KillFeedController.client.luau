@@ -24,6 +24,12 @@ end
 local killFeedEvent = ReplicatedStorage:WaitForChild("KillFeedEvent")
 local MAX_ENTRIES = 6
 
+local TEAM_COLORS = {
+	Blue = Color3.fromRGB(90, 170, 255),
+	Red = Color3.fromRGB(255, 95, 95),
+}
+local DEFAULT_NAME_COLOR = Color3.new(1, 1, 1)
+
 local function trimEntries()
 	local banners = {}
 	for _, child in ipairs(feedContainer:GetChildren()) do
@@ -61,7 +67,7 @@ local function fadeOutBanner(banner)
 	end)
 end
 
-local function addEntry(victimName, killerName)
+local function addEntry(victimName, killerName, victimTeam, killerTeam)
 	local banner = template:Clone()
 	banner.Visible = true
 	banner.Size = UDim2.new(1, 0, 0, 40)
@@ -79,6 +85,7 @@ local function addEntry(victimName, killerName)
 		killerText.Position = UDim2.new(0, 0, 0, 0)
 		if hasKiller then
 			killerText.Text = killerName
+			killerText.TextColor3 = TEAM_COLORS[killerTeam] or DEFAULT_NAME_COLOR
 			killerText.Visible = true
 			killerText.LayoutOrder = 1
 		else
@@ -95,6 +102,7 @@ local function addEntry(victimName, killerName)
 	if victimText then
 		victimText.Position = UDim2.new(0, 0, 0, 0)
 		victimText.Text = victimName or "Unknown"
+		victimText.TextColor3 = TEAM_COLORS[victimTeam] or DEFAULT_NAME_COLOR
 		victimText.Visible = true
 		victimText.LayoutOrder = hasKiller and 3 or 2
 	end

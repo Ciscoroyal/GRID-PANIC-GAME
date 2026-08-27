@@ -56,9 +56,18 @@ function KillFeedService.reportElimination(victim, forcedKiller)
 			PlayerStatsService.addKill(killer)
 			killer:SetAttribute("StatKills", killer:FindFirstChild("TotalKills") and killer.TotalKills.Value or 0)
 		end)
+		pcall(function()
+			local QuestService = require(game:GetService("ServerScriptService"):WaitForChild("QuestService"))
+			QuestService.onEliminate(killer)
+		end)
 	end
 
-	killFeedEvent:FireAllClients(victim.DisplayName, killer and killer.DisplayName or nil)
+	killFeedEvent:FireAllClients(
+		victim.DisplayName,
+		killer and killer.DisplayName or nil,
+		victim:GetAttribute("TeamId"),
+		killer and killer:GetAttribute("TeamId") or nil
+	)
 	lastHitBy[victim] = nil
 	pendingCause[victim] = nil
 

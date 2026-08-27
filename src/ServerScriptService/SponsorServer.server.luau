@@ -10,17 +10,11 @@ local matchCompleteEvent = ServerStorage:WaitForChild("MatchComplete")
 local overheadTagTemplate = ServerStorage:WaitForChild("OverheadTag")
 
 local function getPlayerLevel(player)
-	local wins = player:GetAttribute("StatWins")
-	if wins == nil then
-		local winsValue = player:FindFirstChild("TotalWins")
-		wins = winsValue and winsValue.Value or 0
+	local level = player:GetAttribute("PlayerLevel")
+	if typeof(level) == "number" and level > 0 then
+		return level
 	end
-	local kills = player:GetAttribute("StatKills")
-	if kills == nil then
-		local killsValue = player:FindFirstChild("TotalKills")
-		kills = killsValue and killsValue.Value or 0
-	end
-	return math.max(1, 1 + wins * 2 + kills)
+	return 1
 end
 
 local function updateOverheadTag(player, tag)
@@ -46,9 +40,13 @@ local function updateOverheadTag(player, tag)
 	end
 
 	local streakFrame = frame:FindFirstChild("Streak")
-	local streakLabel = streakFrame and streakFrame:FindFirstChild("Fans")
-	if streakLabel then
-		streakLabel.Text = tostring(player:GetAttribute("WinStreak") or 0)
+	local streakValue = tonumber(player:GetAttribute("WinStreak")) or 0
+	if streakFrame then
+		streakFrame.Visible = streakValue > 0
+		local streakLabel = streakFrame:FindFirstChild("Fans")
+		if streakLabel then
+			streakLabel.Text = tostring(streakValue)
+		end
 	end
 end
 
@@ -160,6 +158,13 @@ Players.PlayerAdded:Connect(function(player)
 		local head = character:WaitForChild("Head", 5)
 		if not head then return end
 
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+			humanoid.NameDisplayDistance = 0
+			humanoid.HealthDisplayDistance = 0
+		end
+
 		local existing = head:FindFirstChild("OverheadTag")
 		if existing then existing:Destroy() end
 
@@ -180,6 +185,10 @@ Players.PlayerAdded:Connect(function(player)
 	player:GetAttributeChangedSignal("StatKills"):Connect(function()
 		refreshPlayerOverheadTag(player)
 	end)
+	player:GetAttributeChangedSignal("PlayerLevel"):Connect(function()
+		refreshPlayerOverheadTag(player)
+	end)
+
 	player:GetAttributeChangedSignal("WinStreak"):Connect(function()
 		refreshPlayerOverheadTag(player)
 	end)
@@ -240,6 +249,10 @@ sponsorEvent.OnServerEvent:Connect(function(sponsor, sponsoredPlayer)
 		bonusCoins = 0,
 	}
 	acceptCheer(sponsor, sponsoredPlayer.DisplayName)
+	pcall(function()
+		local QuestService = require(game:GetService("ServerScriptService"):WaitForChild("QuestService"))
+		QuestService.onSponsor(sponsor)
+	end)
 	-- The Fan Boost 
 	local allTimeFans = sponsoredPlayer:FindFirstChild("AllTimeFans")
 	if allTimeFans then
@@ -293,10 +306,21 @@ matchCompleteEvent.Event:Connect(function()
 			result.targetName = targetPlayer.DisplayName
 		end
 
-		local targetWon = winner ~= nil and (
-			targetPlayer == winner
-			or (result.targetUserId and winner.UserId == result.targetUserId)
-		)
+		local targetWon = false
+		if RoundData.winningTeam == "Survivors" then
+			-- Cheering any hunter pays out when the juggernaut is dethroned
+			targetWon = targetPlayer ~= nil
+				and RoundData.didPlay(targetPlayer)
+				and targetPlayer:GetAttribute("IsJuggernaut") ~= true
+		elseif RoundData.winningTeam then
+			local targetTeam = targetPlayer and (RoundData.getTeam(targetPlayer) or targetPlayer:GetAttribute("TeamId"))
+			targetWon = targetTeam ~= nil and targetTeam == RoundData.winningTeam
+		else
+			targetWon = winner ~= nil and (
+				targetPlayer == winner
+				or (result.targetUserId and winner.UserId == result.targetUserId)
+			)
+		end
 
 		if targetWon then
 			local _, bonusCoins = CoinRewards.awardCoins(sponsor, SPONSOR_PAYOUT)

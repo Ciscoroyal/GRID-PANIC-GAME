@@ -100,3 +100,5 @@ game:BindToClose(function()
 	-- Give the server a couple seconds to finish uploading the data before officially dying
 	task.wait(2)
 end)
+
+require(script.Parent:WaitForChild("LevelService"))

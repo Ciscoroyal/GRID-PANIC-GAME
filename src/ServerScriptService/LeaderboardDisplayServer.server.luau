@@ -38,6 +38,12 @@ local PODIUMS = {
 }
 
 local PODIUM_DISPLAY_FOLDER_NAME = "PodiumDisplays"
+-- Cache top-1 userIds so we only rebuild avatars when the leader changes.
+local podiumLeaderUserIds = {
+	Wins = nil,
+	Fans = nil,
+	Kills = nil,
+}
 
 local function getDisplayFolder()
 	local folder = workspace:FindFirstChild(PODIUM_DISPLAY_FOLDER_NAME)
@@ -69,7 +75,14 @@ local function prepareDisplayCharacter(model)
 		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
 		humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
 		humanoid.AutoRotate = false
+		-- Static for now. Keep Animator intact so idle/victory anims can be added later.
 		humanoid.PlatformStand = true
+	end
+
+	-- Disable default Animate so it doesn't fight a future custom podium track.
+	local animate = model:FindFirstChild("Animate")
+	if animate and (animate:IsA("LocalScript") or animate:IsA("Script")) then
+		animate.Disabled = true
 	end
 
 	for _, part in model:GetDescendants() do
@@ -80,8 +93,6 @@ local function prepareDisplayCharacter(model)
 			part.Massless = true
 		end
 	end
-
-
 end
 
 local function placeModelOnPodium(model, podium, lookTarget)
@@ -103,16 +114,32 @@ local function placeModelOnPodium(model, podium, lookTarget)
 	root.Anchored = true
 end
 
-local function renderPodiumAvatar(podium, userId)
+local function renderPodiumAvatar(boardKey, podium, userId)
+	if podiumLeaderUserIds[boardKey] == userId then
+		-- Same leader already displayed; skip expensive avatar rebuild.
+		local folder = workspace:FindFirstChild(PODIUM_DISPLAY_FOLDER_NAME)
+		local existing = folder and folder:FindFirstChild(podium.Name .. "_Avatar")
+		if existing then
+			return
+		end
+	end
+
 	clearPodiumAvatar(podium)
-	if not userId then return end
+	podiumLeaderUserIds[boardKey] = userId
+	if not userId then
+		return
+	end
 
 	local ok, model = pcall(function()
 		return Players:CreateHumanoidModelFromUserId(userId)
 	end)
-	if not ok or not model then return end
+	if not ok or not model then
+		podiumLeaderUserIds[boardKey] = nil
+		return
+	end
 
 	model.Name = podium.Name .. "_Avatar"
+	model:SetAttribute("DisplayUserId", userId)
 
 	local lobbySpawn = workspace:FindFirstChild("LobbySpawn")
 	local lookTarget = lobbySpawn and lobbySpawn.Position or (podium.Position + podium.CFrame.LookVector * 10)
@@ -121,11 +148,11 @@ local function renderPodiumAvatar(podium, userId)
 	model.Parent = getDisplayFolder()
 end
 
-local function refreshPodiums()
-	local top = PlayerStatsService.getAllTop(1)
-	renderPodiumAvatar(PODIUMS.Wins, top.Wins[1] and top.Wins[1].userId)
-	renderPodiumAvatar(PODIUMS.Fans, top.Fans[1] and top.Fans[1].userId)
-	renderPodiumAvatar(PODIUMS.Kills, top.Kills[1] and top.Kills[1].userId)
+local function refreshPodiums(top)
+	top = top or PlayerStatsService.getAllTop(1)
+	renderPodiumAvatar("Wins", PODIUMS.Wins, top.Wins[1] and top.Wins[1].userId)
+	renderPodiumAvatar("Fans", PODIUMS.Fans, top.Fans[1] and top.Fans[1].userId)
+	renderPodiumAvatar("Kills", PODIUMS.Kills, top.Kills[1] and top.Kills[1].userId)
 end
 
 
@@ -182,12 +209,15 @@ local function renderBoard(boardKey, entries)
 end
 
 local function refreshBoards()
-leaderboardRefreshEvent.Event:Connect(refreshBoards)
 	local top = PlayerStatsService.getAllTop(10)
 	renderBoard("Wins", top.Wins)
 	renderBoard("Fans", top.Fans)
 	renderBoard("Kills", top.Kills)
-	refreshPodiums()
+	refreshPodiums({
+		Wins = { top.Wins[1] },
+		Fans = { top.Fans[1] },
+		Kills = { top.Kills[1] },
+	})
 end
 
 local function buildClientPayload()
@@ -216,6 +246,8 @@ for _, player in ipairs(Players:GetPlayers()) do
 	player:SetAttribute("StatKills", stats.kills)
 end
 
+
+leaderboardRefreshEvent.Event:Connect(refreshBoards)
 refreshBoards()
 while true do
 	task.wait(30)

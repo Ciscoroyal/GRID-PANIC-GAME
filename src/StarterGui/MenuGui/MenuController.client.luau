@@ -24,9 +24,6 @@ local toggleSettings = settingsGui:WaitForChild("ToggleSettings")
 local currentAbilityGui = playerGui:WaitForChild("CurrentAbilityGui")
 local toggleCurrentAbility = currentAbilityGui:WaitForChild("ToggleCurrentAbility")
 
-local questsGui = playerGui:WaitForChild("QuestsGui")
-local toggleQuests = questsGui:WaitForChild("ToggleQuests")
-
 local function setNestedTitle(frame, text)
 	local title = frame:FindFirstChild("Title")
 	if title and title:IsA("TextLabel") then
@@ -44,11 +41,18 @@ local function ensureClickTarget(guiObject)
 	end
 	if guiObject:IsA("GuiButton") then
 		guiObject.Active = true
+		pcall(function()
+			guiObject.Interactable = true
+		end)
 		return guiObject
 	end
 
 	local existing = guiObject:FindFirstChild("ClickTarget")
 	if existing and existing:IsA("GuiButton") then
+		existing.Active = true
+		pcall(function()
+			existing.Interactable = true
+		end)
 		return existing
 	end
 
@@ -58,9 +62,12 @@ local function ensureClickTarget(guiObject)
 	clickTarget.Text = ""
 	clickTarget.Size = UDim2.fromScale(1, 1)
 	clickTarget.Position = UDim2.fromScale(0, 0)
-	clickTarget.ZIndex = (guiObject.ZIndex or 1) + 5
+	clickTarget.ZIndex = (guiObject.ZIndex or 1) + 10
 	clickTarget.Active = true
 	clickTarget.AutoButtonColor = false
+	pcall(function()
+		clickTarget.Interactable = true
+	end)
 	clickTarget.Parent = guiObject
 	return clickTarget
 end
@@ -70,27 +77,68 @@ local function bindClickable(guiObject, callback)
 		return
 	end
 
-	-- Reuse an existing ClickTarget so we don't miss clicks on overlays.
-	local existingTarget = guiObject:FindFirstChild("ClickTarget")
-	if existingTarget and existingTarget:IsA("GuiButton") then
-		existingTarget.Active = true
-		existingTarget.Activated:Connect(callback)
-		return
+	-- Remove stale overlays from earlier experiments
+	local stale = guiObject:FindFirstChild("ClickTarget")
+	if stale and guiObject:IsA("GuiButton") then
+		stale:Destroy()
 	end
 
 	local target = ensureClickTarget(guiObject)
 	if not target then
 		return
 	end
-	target.Activated:Connect(callback)
+
+	for _, desc in ipairs(guiObject:GetDescendants()) do
+		if desc:IsA("GuiObject") and desc ~= target then
+			desc.Active = false
+			pcall(function()
+				desc.Interactable = false
+			end)
+		end
+	end
+
+	-- Keep a real hit surface even when the image is empty
+	if target:IsA("GuiButton") then
+		if target.BackgroundTransparency >= 1 then
+			target.BackgroundTransparency = 0.99
+		end
+		target.Active = true
+		pcall(function()
+			target.Interactable = true
+		end)
+	end
+
+	local lastFire = 0
+	local function guarded()
+		local now = os.clock()
+		if now - lastFire < 0.25 then
+			return
+		end
+		lastFire = now
+		callback()
+	end
+	-- Activated (touch/gamepad) + MouseButton1Click (mouse) with shared debounce
+	target.Activated:Connect(guarded)
+	if target:IsA("GuiButton") then
+		target.MouseButton1Click:Connect(guarded)
+	end
+
+	UIHelpers.bindButtonHover(target, { visual = guiObject })
 end
 
 local function canOpenLobbyPanels()
+	-- Lobby, intermission, practice, or eliminated → allow
+	if localPlayer:GetAttribute("InPractice") == true then
+		return true
+	end
 	if localPlayer:GetAttribute("InArena") ~= true then
 		return true
 	end
-	local countdown = survivalTimeValue.Value
-	return countdown >= 1 and countdown <= 15
+	if localPlayer:GetAttribute("IsEliminated") == true then
+		return true
+	end
+	-- Actively surviving in the arena → lock lobby menus
+	return false
 end
 
 local function canOpenAbilityMenu()
@@ -106,19 +154,6 @@ local function closeAllPanels()
 	toggleRewards:Fire("Close")
 	toggleSettings:Fire("Close")
 	toggleCurrentAbility:Fire("Close")
-	toggleQuests:Fire("Close")
-end
-
-local function openQuests()
-	if not canOpenLobbyPanels() then
-		return
-	end
-	toggleLoadout:Fire("Close")
-	toggleStore:Fire("Close")
-	toggleRewards:Fire("Close")
-	toggleSettings:Fire("Close")
-	toggleCurrentAbility:Fire("Close")
-	toggleQuests:Fire("Open")
 end
 
 local function openCurrentAbility()
@@ -129,7 +164,6 @@ local function openCurrentAbility()
 	toggleStore:Fire("Close")
 	toggleRewards:Fire("Close")
 	toggleSettings:Fire("Close")
-	toggleQuests:Fire("Close")
 	toggleCurrentAbility:Fire("Open")
 end
 
@@ -141,7 +175,6 @@ local function openLoadout()
 	toggleRewards:Fire("Close")
 	toggleSettings:Fire("Close")
 	toggleCurrentAbility:Fire("Close")
-	toggleQuests:Fire("Close")
 	toggleLoadout:Fire("Ability")
 end
 
@@ -153,7 +186,6 @@ local function openStore()
 	toggleRewards:Fire("Close")
 	toggleSettings:Fire("Close")
 	toggleCurrentAbility:Fire("Close")
-	toggleQuests:Fire("Close")
 	toggleStore:Fire("SHOP")
 end
 
@@ -165,7 +197,6 @@ local function openRewards()
 	toggleStore:Fire("Close")
 	toggleSettings:Fire("Close")
 	toggleCurrentAbility:Fire("Close")
-	toggleQuests:Fire("Close")
 	toggleRewards:Fire("Trophy")
 end
 
@@ -177,7 +208,6 @@ local function openSettings()
 	toggleStore:Fire("Close")
 	toggleRewards:Fire("Close")
 	toggleCurrentAbility:Fire("Close")
-	toggleQuests:Fire("Close")
 	toggleSettings:Fire("Open")
 end
 
@@ -195,6 +225,16 @@ local function updateFriendBoost()
 	if title and title:IsA("TextLabel") then
 		title.Text = "Friend Boost\n+" .. boostPercent .. "% COINS"
 	end
+end
+
+local function updateMenuButtonsVisibility()
+	local menuButtons = menuGui:FindFirstChild("Buttons")
+	if not menuButtons then
+		return
+	end
+	local inMatch = localPlayer:GetAttribute("InArena") == true
+		and localPlayer:GetAttribute("IsEliminated") ~= true
+	menuButtons.Visible = not inMatch
 end
 
 local function updateCurrentAbilityIcon()
@@ -228,35 +268,25 @@ local function bindCurrency(frame, getValue)
 	end
 end
 
-bindCurrency(menuGui:WaitForChild("Money"), function()
-	local leaderstats = localPlayer:WaitForChild("leaderstats", 15)
-	return leaderstats and leaderstats:WaitForChild("Coins", 15)
-end)
-
-bindCurrency(menuGui:WaitForChild("Fans"), function()
-	return localPlayer:WaitForChild("AllTimeFans", 15)
-end)
-
-localPlayer:GetAttributeChangedSignal("FriendBoostPercent"):Connect(updateFriendBoost)
-updateFriendBoost()
-
-local friendBoostFrame = menuGui:FindFirstChild("FriendBoost")
-if friendBoostFrame then
-	local inviteBtn = friendBoostFrame:FindFirstChild("FriendButton")
-	if inviteBtn and inviteBtn:IsA("GuiButton") then
-		inviteBtn.MouseButton1Click:Connect(function()
-			pcall(function()
-				SocialService:PromptGameInvite(localPlayer)
-			end)
-		end)
-	end
-end
-
-bindClickable(menuGui:FindFirstChild("TaskButton"), openQuests)
+-- Bind lobby strip FIRST (before any WaitForChild that can yield)
 bindClickable(menuGui:FindFirstChild("PouchButton"), openLoadout)
 bindClickable(menuGui:FindFirstChild("StoreButton"), openStore)
 bindClickable(menuGui:FindFirstChild("TrophyButton"), openRewards)
 bindClickable(menuGui:FindFirstChild("SettingButton"), openSettings)
+
+local menuButtons = menuGui:FindFirstChild("Buttons")
+if menuButtons then
+	-- Active=false is fine (parent doesn't need to sink input).
+	-- Do NOT set Interactable=false — that disables all child buttons.
+	menuButtons.Active = false
+	pcall(function()
+		menuButtons.Interactable = true
+	end)
+	bindClickable(menuButtons:FindFirstChild("Loadout"), openLoadout)
+	bindClickable(menuButtons:FindFirstChild("Store"), openStore)
+	bindClickable(menuButtons:FindFirstChild("Rewards"), openRewards)
+	bindClickable(menuButtons:FindFirstChild("Setting"), openSettings)
+end
 
 local currentAbilityFrame = menuGui:FindFirstChild("Current Ablilty")
 if currentAbilityFrame then
@@ -271,7 +301,39 @@ localPlayer:GetAttributeChangedSignal("EquippedAbility"):Connect(updateCurrentAb
 
 localPlayer:GetAttributeChangedSignal("InArena"):Connect(function()
 	updateFriendBoost()
+	updateMenuButtonsVisibility()
 	if localPlayer:GetAttribute("InArena") == true then
 		closeAllPanels()
 	end
+end)
+
+localPlayer:GetAttributeChangedSignal("IsEliminated"):Connect(updateMenuButtonsVisibility)
+
+localPlayer:GetAttributeChangedSignal("FriendBoostPercent"):Connect(updateFriendBoost)
+updateFriendBoost()
+updateMenuButtonsVisibility()
+
+local friendBoostFrame = menuGui:FindFirstChild("FriendBoost")
+if friendBoostFrame then
+	local inviteBtn = friendBoostFrame:FindFirstChild("FriendButton")
+	if inviteBtn and inviteBtn:IsA("GuiButton") then
+		inviteBtn.MouseButton1Click:Connect(function()
+			pcall(function()
+				SocialService:PromptGameInvite(localPlayer)
+			end)
+		end)
+		UIHelpers.bindButtonHover(inviteBtn, { visual = friendBoostFrame })
+	end
+end
+
+-- Currency binds last — these WaitForChild calls must not delay button wiring
+task.spawn(function()
+	bindCurrency(menuGui:WaitForChild("Money"), function()
+		local leaderstats = localPlayer:WaitForChild("leaderstats", 15)
+		return leaderstats and leaderstats:WaitForChild("Coins", 15)
+	end)
+
+	bindCurrency(menuGui:WaitForChild("Fans"), function()
+		return localPlayer:WaitForChild("AllTimeFans", 15)
+	end)
 end)

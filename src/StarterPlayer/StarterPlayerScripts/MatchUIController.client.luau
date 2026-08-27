@@ -1,14 +1,15 @@
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local localPlayer = Players.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui")
+local currentGameMode = ReplicatedStorage:WaitForChild("CurrentGameMode")
 
 local LOBBY_MENU_BUTTONS = {
 	"PouchButton",
 	"StoreButton",
 	"TrophyButton",
-	"TaskButton",
 	"SettingButton",
 }
 
@@ -32,10 +33,6 @@ local function setVisible(instance, visible)
 	if instance then
 		instance.Visible = visible
 	end
-end
-
-local function shouldShowMobileControls()
-	return UserInputService.TouchEnabled
 end
 
 local function restoreFollowCamera(character)
@@ -62,19 +59,20 @@ local function updateMatchUI()
 	local inArena = localPlayer:GetAttribute("InArena") == true
 	local eliminated = localPlayer:GetAttribute("IsEliminated") == true
 	local inMatch = inArena and not eliminated
-	local showMobile = shouldShowMobileControls()
-
+	local abilitiesAllowed = currentGameMode.Value ~= "PureSurvival"
 	local mobileGui = getMobileGui()
 	if mobileGui then
 		mobileGui.Enabled = true
 		local abilityButton = mobileGui:FindFirstChild("AbilityButton")
 		local dashButton = mobileGui:FindFirstChild("DashButton")
-		setVisible(abilityButton, showMobile and inMatch)
-		setVisible(dashButton, showMobile and not eliminated)
+		setVisible(abilityButton, inMatch and abilitiesAllowed)
+		setVisible(dashButton, not eliminated)
 	end
 
 	local menuGui = getMenuGui()
 	if menuGui then
+		local tasksPanel = menuGui:FindFirstChild("Tasks")
+		setVisible(tasksPanel, not inMatch)
 		for _, buttonName in ipairs(LOBBY_MENU_BUTTONS) do
 			local button = menuGui:FindFirstChild(buttonName)
 			setVisible(button, not inMatch)
@@ -126,6 +124,7 @@ localPlayer:GetAttributeChangedSignal("IsEliminated"):Connect(function()
 		task.defer(ensureFollowCamera)
 	end
 end)
+currentGameMode.Changed:Connect(updateMatchUI)
 localPlayer.CharacterAdded:Connect(function(character)
 	restoreFollowCamera(character)
 end)

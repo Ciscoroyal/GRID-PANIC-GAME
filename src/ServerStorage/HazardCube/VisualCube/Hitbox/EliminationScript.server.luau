@@ -1,36 +1,12 @@
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
-local CoinRewards = require(ReplicatedStorage:WaitForChild("CoinRewards"))
+local ServerScriptService = game:GetService("ServerScriptService")
+local EliminationService = require(ServerScriptService:WaitForChild("EliminationService"))
 local block = script.Parent
-local vfxEvent = ReplicatedStorage:WaitForChild("VFXEvent")
 
 local triggered = false
 
-local function eliminatePlayer(player, character, humanoid)
-	if player:GetAttribute("HasShield") == true then
-		player:SetAttribute("HasShield", nil)
-		local shieldVis = character:FindFirstChild("ShieldVisual")
-		if shieldVis then shieldVis:Destroy() end
-		vfxEvent:FireClient(player, "LightShake")
-	else
-		player:SetAttribute("IsEliminated", true)
-		player:SetAttribute("CanSponsorThisRound", true)
-		humanoid.Health = 0
-		vfxEvent:FireClient(player, "HeavyShake")
-
-		local t = ReplicatedStorage:WaitForChild("SurvivalTime").Value
-		local multiplier = 1 + (3 / (1 + math.exp(-0.05 * (t - 45))))
-		local totalPayout = math.floor(t * multiplier)
-		local totalXP = math.floor((t * 1.5) * multiplier)
-
-		local leaderstats = player:FindFirstChild("leaderstats")
-		if leaderstats then
-			local xpVal = leaderstats:FindFirstChild("XP")
-			CoinRewards.awardCoins(player, totalPayout)
-			if xpVal then xpVal.Value = xpVal.Value + totalXP end
-		end
-
-	end
+local function eliminatePlayer(player)
+	EliminationService.eliminate(player, { cause = "hazard", respectShield = true })
 end
 
 local hazardModel = block:FindFirstAncestorWhichIsA("Model") or block.Parent
@@ -53,7 +29,7 @@ local function tryHitPart(hit)
 
 	if player and player:GetAttribute("InArena") == true and player:GetAttribute("IsEliminated") ~= true and humanoid.Health > 0 then
 		triggered = true
-		eliminatePlayer(player, character, humanoid)
+		eliminatePlayer(player)
 	end
 end
 

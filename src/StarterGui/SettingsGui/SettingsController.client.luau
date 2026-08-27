@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local PlayerSettings = require(ReplicatedStorage:WaitForChild("PlayerSettings"))
+local UIHelpers = require(ReplicatedStorage:WaitForChild("UIHelpers"))
 
 local localPlayer = Players.LocalPlayer
 local settingsGui = script.Parent
@@ -46,22 +47,29 @@ local function refreshAll()
 	end
 end
 
+local function canShowLobbyPanel()
+	if localPlayer:GetAttribute("InPractice") == true then
+		return true
+	end
+	if localPlayer:GetAttribute("InArena") ~= true then
+		return true
+	end
+	if localPlayer:GetAttribute("IsEliminated") == true then
+		return true
+	end
+	return false
+end
+
 local function setSettingsVisible(isVisible)
-	if isVisible and localPlayer:GetAttribute("InArena") == true then
+	if isVisible and not canShowLobbyPanel() then
 		return
 	end
 
-	settingsFrame.Visible = isVisible
 	if isVisible then
 		refreshAll()
-		settingsFrame.Position = UDim2.new(0.5, 0, 0.56, 0)
-		settingsFrame:TweenPosition(
-			UDim2.new(0.5, 0, 0.5, 0),
-			Enum.EasingDirection.Out,
-			Enum.EasingStyle.Back,
-			0.3,
-			true
-		)
+		UIHelpers.animatePanelOpen(settingsFrame, { duration = 0.3 })
+	else
+		UIHelpers.animatePanelClose(settingsFrame)
 	end
 end
 
@@ -77,6 +85,7 @@ for rowName, key in pairs(SETTING_ROWS) do
 			PlayerSettings.toggle(key)
 			refreshRow(row, key)
 		end)
+		UIHelpers.bindButtonHover(toggle)
 	end
 
 	PlayerSettings.onChanged(key, function()
@@ -105,6 +114,8 @@ localPlayer:GetAttributeChangedSignal("InArena"):Connect(function()
 		setSettingsVisible(false)
 	end
 end)
+
+UIHelpers.bindButtonHover(closeBtn)
 
 settingsFrame.Visible = false
 refreshAll()

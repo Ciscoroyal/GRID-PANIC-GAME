@@ -6,8 +6,13 @@ local Players = game:GetService("Players")
 
 local CoinRewards = require(ReplicatedStorage:WaitForChild("CoinRewards"))
 local KillFeedService = require(ServerScriptService:WaitForChild("KillFeedService"))
+local EliminationService = require(ServerScriptService:WaitForChild("EliminationService"))
 local RoundData = require(ReplicatedStorage:WaitForChild("RoundData"))
+local LevelService = require(ServerScriptService:WaitForChild("LevelService"))
+local VoteService = require(ServerScriptService:WaitForChild("VoteService"))
+local ShrinkService = require(ServerScriptService:WaitForChild("ShrinkService"))
 local matchResultsEvent = ReplicatedStorage:WaitForChild("MatchResultsEvent")
+local currentGameMode = ReplicatedStorage:WaitForChild("CurrentGameMode")
 
 local COIN_ICON = "rbxassetid://73157782004178"
 local XP_ICON = "rbxassetid://94843213797100"
@@ -85,6 +90,8 @@ end
 local arenaGrid = Workspace:WaitForChild("ArenaGrid")
 local hazardCubeModel = ServerStorage:WaitForChild("HazardCube")
 local survivalTimeValue = ReplicatedStorage:WaitForChild("SurvivalTime")
+local playersAliveValue = ReplicatedStorage:WaitForChild("PlayersAlive")
+local aliveStatusValue = ReplicatedStorage:WaitForChild("AliveStatus")
 local matchCompleteEvent = ServerStorage:WaitForChild("MatchComplete")
 
 -- THE NEW REMOTE EVENT
@@ -105,6 +112,12 @@ local campTracker = {}
 
 local MIN_ACTIVE_HAZARDS = 4
 local MAX_ACTIVE_HAZARDS_CAP = 32
+local OVERTIME_HAZARDS_CAP = 64
+
+-- Difficulty curve is keyed to CORE through 1:35; match can run to MAX (2:00).
+local CORE_DIFFICULTY_TIME = 95
+local MAX_MATCH_TIME = 120
+
 local currentMaxActiveHazards = MIN_ACTIVE_HAZARDS
 local currentMatchTime = 0
 local activeHazardCount = 0
@@ -112,13 +125,40 @@ local activeHazardCount = 0
 local reservedTiles = {}
 local cachedArenaTiles = {}
 
-local function getMaxActiveHazards(timePassed, maxMatchTime)
+-- 0 at t<=2, 0..1 across 2..95 (same as old curve), then 1..3 across 95..120.
+local function getDifficultyProgress(timePassed)
 	if timePassed <= 2 then
-		return MIN_ACTIVE_HAZARDS
+		return 0
+	end
+	if timePassed <= CORE_DIFFICULTY_TIME then
+		return (timePassed - 2) / (CORE_DIFFICULTY_TIME - 2)
+	end
+	local overtime = (timePassed - CORE_DIFFICULTY_TIME) / (MAX_MATCH_TIME - CORE_DIFFICULTY_TIME)
+	return 1 + math.clamp(overtime, 0, 1) * 2
+end
+
+local function getMaxActiveHazards(timePassed)
+	if timePassed <= 2 then
+		local base = MIN_ACTIVE_HAZARDS
+		if currentGameMode.Value == "Shrinking" then
+			base = math.max(2, math.floor(base * 0.55))
+		end
+		return base
 	end
 	local rampStartCount = 6
-	local progress = (timePassed - 2) / (maxMatchTime - 2)
-	return math.floor(rampStartCount + ((MAX_ACTIVE_HAZARDS_CAP - rampStartCount) * progress))
+	local progress = getDifficultyProgress(timePassed)
+	local capped
+	if progress <= 1 then
+		-- Identical to the old 0..95 curve ending at MAX_ACTIVE_HAZARDS_CAP.
+		capped = math.floor(rampStartCount + ((MAX_ACTIVE_HAZARDS_CAP - rampStartCount) * progress))
+	else
+		local over = math.clamp(progress - 1, 0, 2) / 2
+		capped = math.floor(MAX_ACTIVE_HAZARDS_CAP + ((OVERTIME_HAZARDS_CAP - MAX_ACTIVE_HAZARDS_CAP) * over))
+	end
+	if currentGameMode.Value == "Shrinking" then
+		capped = math.max(2, math.floor(capped * 0.55))
+	end
+	return capped
 end
 
 local function getTargetChance(activeCount, maxActive)
@@ -133,7 +173,7 @@ end
 local function getAvailableTiles(tiles)
 	local available = {}
 	for _, tile in ipairs(tiles) do
-		if not reservedTiles[tile] then
+		if not reservedTiles[tile] and not ShrinkService.isFallen(tile) then
 			table.insert(available, tile)
 		end
 	end
@@ -152,7 +192,7 @@ local function pickNearestAvailableTile(tiles, position)
 	local bestTile = nil
 	local shortestDistance = math.huge
 	for _, tile in ipairs(tiles) do
-		if not reservedTiles[tile] then
+		if not reservedTiles[tile] and not ShrinkService.isFallen(tile) then
 			local flatPos = Vector3.new(position.X, 0, position.Z)
 			local flatTilePos = Vector3.new(tile.Position.X, 0, tile.Position.Z)
 			local dist = (flatTilePos - flatPos).Magnitude
@@ -189,6 +229,8 @@ local function resetTile(tile)
 	tile.BrickColor = BASE_TILE_COLOR
 	tile.Color = BASE_TILE_COLOR.Color
 	tile.Material = Enum.Material.Concrete
+	tile.CanCollide = true
+	tile.Transparency = 0
 end
 
 -- Helper function to count living players IN THE ARENA
@@ -245,62 +287,24 @@ local function checkFallEliminations(arenaFloorY)
 			local root = character and character:FindFirstChild("HumanoidRootPart")
 			local humanoid = character and character:FindFirstChild("Humanoid")
 			if root and humanoid and humanoid.Health > 0 and root.Position.Y < arenaFloorY then
-				KillFeedService.setPendingCause(player, "fall")
-				humanoid.Health = 0
+				EliminationService.eliminate(player, { cause = "fall", respectShield = false })
 			end
 		end
 	end
 end
 
-local respawningPlayers = {}
+EliminationService.onEliminated(function(player)
+	eliminationTimes[player] = survivalTimeValue.Value
+	table.insert(eliminationOrder, player)
+	updateAliveHud()
+end)
 
 local function sendEliminatedToLobby(player)
-	if not player or not player.Parent then return end
-	if player:GetAttribute("IsEliminated") ~= true then return end
-	if respawningPlayers[player] then return end
-
-	respawningPlayers[player] = true
-
-	if deathConnections[player] then
-		deathConnections[player]:Disconnect()
-		deathConnections[player] = nil
-	end
-	if characterAddedConnections[player] then
-		characterAddedConnections[player]:Disconnect()
-		characterAddedConnections[player] = nil
-	end
-
-	local lobbySpawn = Workspace:FindFirstChild("LobbySpawn")
-	if lobbySpawn and lobbySpawn:IsA("SpawnLocation") then
-		player.RespawnLocation = lobbySpawn
-	else
-		player.RespawnLocation = nil
-	end
-
-	player:LoadCharacter()
-	local character = player.Character or player.CharacterAdded:Wait()
-	local root = character:WaitForChild("HumanoidRootPart", 10)
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if root and lobbySpawn then
-		local spawnCF = lobbySpawn.CFrame * CFrame.new(0, 3, 0)
-		character:PivotTo(spawnCF)
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.AssemblyAngularVelocity = Vector3.zero
-	end
-	if humanoid then
-		humanoid.Health = humanoid.MaxHealth
-	end
-	task.delay(0.5, function() respawningPlayers[player] = nil end)
+	EliminationService.teleportToLobby(player)
 end
 
 local function markArenaEliminated(player)
-	if player:GetAttribute("InArena") ~= true then return end
-	if player:GetAttribute("IsEliminated") == true then return end
-	player:SetAttribute("IsEliminated", true)
-	player:SetAttribute("CanSponsorThisRound", true)
-	eliminationTimes[player] = survivalTimeValue.Value
-	table.insert(eliminationOrder, player)
-	KillFeedService.reportElimination(player)
+	EliminationService.eliminate(player, { respectShield = false })
 end
 
 local function bindArenaDeathTracking(player)
@@ -321,8 +325,8 @@ local function bindArenaDeathTracking(player)
 			deathConnections[player]:Disconnect()
 		end
 		deathConnections[player] = humanoid.Died:Connect(function()
-			markArenaEliminated(player)
-			sendEliminatedToLobby(player)
+			-- Fallback only: soft-eliminate paths should not kill the Humanoid
+			EliminationService.eliminate(player, { respectShield = false })
 		end)
 	end
 
@@ -342,7 +346,148 @@ local function getEliminatedCount()
 	return count
 end
 
+
+local TEAM_BLUE = "Blue"
+local TEAM_RED = "Red"
+
+local function shuffleList(list)
+	for i = #list, 2, -1 do
+		local j = math.random(1, i)
+		list[i], list[j] = list[j], list[i]
+	end
+end
+
+local function assignTeams(contestants)
+	RoundData.clearTeams()
+	local shuffled = table.clone(contestants)
+	shuffleList(shuffled)
+	local half = math.ceil(#shuffled / 2)
+	for i, player in ipairs(shuffled) do
+		RoundData.setTeam(player, i <= half and TEAM_BLUE or TEAM_RED)
+	end
+end
+
+local function getArenaBounds(tiles, fallbackPart)
+	local minX, maxX = math.huge, -math.huge
+	local minZ, maxZ = math.huge, -math.huge
+	local y = fallbackPart and fallbackPart.Position.Y or 5
+	for _, tile in ipairs(tiles) do
+		minX = math.min(minX, tile.Position.X)
+		maxX = math.max(maxX, tile.Position.X)
+		minZ = math.min(minZ, tile.Position.Z)
+		maxZ = math.max(maxZ, tile.Position.Z)
+		y = tile.Position.Y + (tile.Size.Y / 2) + 3
+	end
+	if minX == math.huge then
+		local p = fallbackPart.Position
+		return p.X - 20, p.X + 20, p.Z - 20, p.Z + 20, p.Y + 3
+	end
+	return minX, maxX, minZ, maxZ, y
+end
+
+local function teleportTeamsOppositeSides(contestants, tiles, fallbackPart)
+	local minX, maxX, minZ, maxZ, y = getArenaBounds(tiles, fallbackPart)
+	local midZ = (minZ + maxZ) / 2
+	local inset = math.max(4, (maxX - minX) * 0.12)
+	local blueX = minX + inset
+	local redX = maxX - inset
+
+	local blues, reds = {}, {}
+	for _, player in ipairs(contestants) do
+		if RoundData.getTeam(player) == TEAM_RED then
+			table.insert(reds, player)
+		else
+			table.insert(blues, player)
+		end
+	end
+
+	local function placeTeam(list, x)
+		local count = #list
+		for i, player in ipairs(list) do
+			local character = player.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+			if root then
+				local zSpread = 0
+				if count > 1 then
+					local span = math.max(6, (maxZ - minZ) * 0.55)
+					zSpread = -span / 2 + span * ((i - 1) / (count - 1))
+				end
+				local lookAt = Vector3.new((minX + maxX) / 2, y, midZ + zSpread)
+				local pos = Vector3.new(x, y, midZ + zSpread)
+				root.CFrame = CFrame.lookAt(pos, lookAt)
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.AssemblyAngularVelocity = Vector3.zero
+			end
+		end
+	end
+
+	placeTeam(blues, blueX)
+	placeTeam(reds, redX)
+end
+
+local function getAliveTeamCounts()
+	local blue, red = 0, 0
+	for _, player in ipairs(Players:GetPlayers()) do
+		if isAliveContestant(player) then
+			local team = RoundData.getTeam(player)
+			if team == TEAM_BLUE then
+				blue += 1
+			elseif team == TEAM_RED then
+				red += 1
+			end
+		end
+	end
+	return blue, red
+end
+
+local function updateAliveHud()
+	if currentGameMode.Value == "Team" then
+		local blueAlive, redAlive = getAliveTeamCounts()
+		local total = blueAlive + redAlive
+		playersAliveValue.Value = total
+		if total <= 0 then
+			aliveStatusValue.Value = ""
+		else
+			aliveStatusValue.Value = string.format("%dv%d", blueAlive, redAlive)
+		end
+		return
+	end
+
+	local alive = getAliveCount()
+	playersAliveValue.Value = alive
+	if alive <= 0 then
+		aliveStatusValue.Value = ""
+	else
+		aliveStatusValue.Value = string.format("%d LEFT", alive)
+	end
+end
+
+local function clearAliveHud()
+	playersAliveValue.Value = 0
+	aliveStatusValue.Value = ""
+end
+
 local function shouldEndMatch(playersAtStart, currentAlive)
+	if currentGameMode.Value == "Team" then
+		local blueAlive, redAlive = getAliveTeamCounts()
+		if playersAtStart <= 1 then
+			return currentAlive == 0
+		end
+		-- End when one team is wiped (friendly fire / hazards can wipe both)
+		return blueAlive == 0 or redAlive == 0
+	end
+	if currentGameMode.Value == "Juggernaut" then
+		local jugg = RoundData.getJuggernaut()
+		-- Hunters win as soon as the juggernaut is eliminated
+		if not jugg or not isAliveContestant(jugg) then
+			return true
+		end
+		-- Juggernaut wins when all hunters are gone
+		if playersAtStart <= 1 then
+			return currentAlive == 0
+		end
+		return currentAlive <= 1
+	end
 	if playersAtStart <= 1 then
 		return currentAlive == 0
 	end
@@ -370,6 +515,42 @@ local function updateLastAlivePlayer()
 	if #alivePlayers == 1 then
 		lastAlivePlayer = alivePlayers[1]
 	end
+end
+
+local function resolveWinningTeam(matchTime)
+	local blueAlive, redAlive = getAliveTeamCounts()
+	if blueAlive > 0 and redAlive == 0 then
+		return TEAM_BLUE
+	end
+	if redAlive > 0 and blueAlive == 0 then
+		return TEAM_RED
+	end
+
+	-- Both wiped or timeout: team with longer total survival among contestants
+	local blueTime, redTime = 0, 0
+	for player in pairs(RoundData.contestants) do
+		local team = RoundData.getTeam(player)
+		local t = eliminationTimes[player] or matchTime
+		if team == TEAM_BLUE then
+			blueTime += t
+		elseif team == TEAM_RED then
+			redTime += t
+		end
+	end
+	if blueTime > redTime then
+		return TEAM_BLUE
+	end
+	if redTime > blueTime then
+		return TEAM_RED
+	end
+
+	if lastAlivePlayer and lastAlivePlayer.Parent then
+		return RoundData.getTeam(lastAlivePlayer)
+	end
+	if #eliminationOrder > 0 then
+		return RoundData.getTeam(eliminationOrder[#eliminationOrder])
+	end
+	return TEAM_BLUE
 end
 
 local function resolveWinner(matchTime, playersAtStart)
@@ -415,26 +596,19 @@ local function awardSurvivalRewards(player, survivalTime)
 	totalCoins = math.max(totalCoins, MIN_SURVIVAL_COINS)
 	local _, bonusCoins = CoinRewards.awardCoins(player, totalCoins)
 
+	local gainedXP = LevelService.awardXP(player, totalXP)
+
 	RoundData.survivorRewards[player] = {
 		coins = totalCoins,
 		bonusCoins = bonusCoins,
-		xp = totalXP,
+		xp = gainedXP,
 	}
-
-	local leaderstats = player:FindFirstChild("leaderstats")
-	if leaderstats then
-		local xpVal = leaderstats:FindFirstChild("XP")
-		if xpVal then
-			xpVal.Value = xpVal.Value + totalXP
-		end
-	end
 end
 
 -- Teleport helper function
 local function teleportPlayers(playersList, targetPart)
 	for _, player in ipairs(playersList) do
 		if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-			-- Lift them slightly above the target part so they don't spawn stuck in the floor
 			player.Character.HumanoidRootPart.CFrame = targetPart.CFrame * CFrame.new(0, 3, 0)
 		end
 	end
@@ -543,8 +717,11 @@ local function spawnHazard()
 			local player = Players:GetPlayerFromCharacter(character)
 			-- Ensure they are an active player in the arena
 			if player and player:GetAttribute("InArena") == true and player:GetAttribute("IsEliminated") ~= true then
-				KillFeedService.markHazardKill(player)
-				character.Humanoid.Health = 0
+				-- Juggernaut is immune to falling grid hazards (still dies to edge / kill floor)
+				if player:GetAttribute("IsJuggernaut") == true then
+					continue
+				end
+				EliminationService.eliminate(player, { cause = "hazard", respectShield = true })
 			end
 		end
 	end
@@ -577,14 +754,32 @@ end
 
 -- === THE MAIN GAME LOOP STATE MACHINE ===
 while true do
-	-- STATE 1: INTERMISSION
+	-- STATE 1: INTERMISSION + MODE VOTE
+	clearAliveHud()
 	local intermissionDuration = 15
-	for i = intermissionDuration, 1, -1 do 
+	local voteDuration = 12
+	local chosenMode = "Classic"
+	local voteFinished = false
+
+	task.spawn(function()
+		chosenMode = VoteService.runVote(voteDuration) or "Classic"
+		voteFinished = true
+	end)
+
+	for i = intermissionDuration, 1, -1 do
 		survivalTimeValue.Value = i
 		task.wait(1)
 		if #Players:GetPlayers() < 1 then
 			repeat task.wait(1) until #Players:GetPlayers() >= 1
 		end
+	end
+
+	local waitDeadline = os.clock() + 3
+	while not voteFinished and os.clock() < waitDeadline do
+		task.wait(0.1)
+	end
+	if not voteFinished then
+		chosenMode = "Classic"
 	end
 
 	local activeContestants = {}
@@ -595,33 +790,65 @@ while true do
 	end
 
 	if #activeContestants == 0 then
+		currentGameMode.Value = ""
 		continue
+	end
+
+	-- Team / Juggernaut need at least 2 players; otherwise fall back to Classic
+	if (chosenMode == "Team" or chosenMode == "Juggernaut") and #activeContestants < 2 then
+		chosenMode = "Classic"
 	end
 
 	-- STATE 2: PREPARE ROUND
 	RoundData.clear()
+	RoundData.clearTeams()
+	RoundData.setMode(chosenMode)
+	currentGameMode.Value = chosenMode
 	table.clear(eliminationTimes)
 	table.clear(eliminationOrder)
 	table.clear(campTracker)
 	lastAlivePlayer = nil
-	teleportPlayers(activeContestants, arenaSpawn)
 
 	for _, player in ipairs(activeContestants) do
 		player:SetAttribute("IsEliminated", nil)
 		player:SetAttribute("CanSponsorThisRound", nil)
+		player:SetAttribute("IsJuggernaut", nil)
 		bindArenaDeathTracking(player)
 		player:SetAttribute("InArena", true)
 		player:SetAttribute("InPractice", nil)
-	end
-
-	for _, player in ipairs(activeContestants) do
 		RoundData.markContestant(player)
 	end
 
+	local tilesForSpawn = getGridTiles(arenaGrid)
+	if chosenMode == "Team" then
+		assignTeams(activeContestants)
+		teleportTeamsOppositeSides(activeContestants, tilesForSpawn, arenaSpawn)
+	else
+		teleportPlayers(activeContestants, arenaSpawn)
+	end
+
+	if chosenMode == "Juggernaut" then
+		local pick = activeContestants[math.random(1, #activeContestants)]
+		RoundData.setJuggernaut(pick)
+	end
+
 	local rollCallData = {}
+	local modeForRollCall = currentGameMode.Value
 	for _, player in ipairs(activeContestants) do
 		local ability = player:GetAttribute("EquippedAbility") or "None"
-		rollCallData[player.Name] = ability
+		if modeForRollCall == "PunchOut" then
+			ability = "Grid Punch"
+		elseif modeForRollCall == "PureSurvival" then
+			ability = "None"
+		end
+		local roleTeam = RoundData.getTeam(player)
+		if modeForRollCall == "Juggernaut" then
+			roleTeam = RoundData.isJuggernaut(player) and "Juggernaut" or "Hunter"
+		end
+		rollCallData[player.Name] = {
+			ability = ability,
+			team = roleTeam,
+		}
 	end
 
 	local showRollCall = ReplicatedStorage:WaitForChild("ShowRollCall")
@@ -631,22 +858,30 @@ while true do
 
 	cachedArenaTiles = getGridTiles(arenaGrid)
 	reservedTiles = {}
+	ShrinkService.stop()
+	ShrinkService.restoreAll()
 
 	local arenaFloorY = getArenaFloorY(cachedArenaTiles, arenaSpawn.Position.Y)
 
 	survivalTimeValue.Value = 0
 	local timePassed = 0
-	local MAX_MATCH_TIME = 95 
-	local startDelay = 0.15 
-	local endDelay = 0.01  
+	local startDelay = 0.15
+	local endDelay = 0.01
+	local overtimeEndDelay = 0.005
 	local playersAtStart = #activeContestants
 
-	task.wait(4.5) 
+	task.wait(3.2)
 
-	-- STATE 3: IN-GAME 
+	if chosenMode == "Shrinking" then
+		ShrinkService.start(cachedArenaTiles)
+	end
+
+	updateAliveHud()
+
+	-- STATE 3: IN-GAME
 	while timePassed < MAX_MATCH_TIME do
 		currentMatchTime = timePassed
-		currentMaxActiveHazards = getMaxActiveHazards(timePassed, MAX_MATCH_TIME)
+		currentMaxActiveHazards = getMaxActiveHazards(timePassed)
 
 		task.spawn(spawnHazard)
 
@@ -658,16 +893,41 @@ while true do
 			task.spawn(spawnHazard)
 		end
 
+		-- Overtime (1:35 → 2:00): escalate toward unwinnable chaos
+		if timePassed >= CORE_DIFFICULTY_TIME then
+			task.spawn(spawnHazard)
+		end
+
+		if timePassed >= 105 then
+			task.spawn(spawnHazard)
+			task.spawn(spawnHazard)
+		end
+
+		if timePassed >= 115 then
+			for _ = 1, 4 do
+				task.spawn(spawnHazard)
+			end
+		end
+
 		local currentDelay
+		local delayFloor = endDelay
+
 		if timePassed <= 2 then
 			currentDelay = 0.35
 		else
-			local progress = (timePassed - 2) / (MAX_MATCH_TIME - 2)
-			currentDelay = startDelay - ((startDelay - endDelay) * progress)
+			local progress = getDifficultyProgress(timePassed)
+			if progress <= 1 then
+				-- Same delay curve as the old 0..95 match
+				currentDelay = startDelay - ((startDelay - endDelay) * progress)
+			else
+				local over = math.clamp(progress - 1, 0, 2) / 2
+				currentDelay = endDelay * (1 - over)
+				delayFloor = overtimeEndDelay
+			end
 		end
 
 		local randomFuzz = math.random(-5, 5) / 100
-		local finalDelay = math.clamp(currentDelay + randomFuzz, endDelay, 0.85)
+		local finalDelay = math.clamp(currentDelay + randomFuzz, delayFloor, 0.85)
 
 		-- ==========================================
 		-- ANTI-CAMP TRACKER UPDATE
@@ -702,6 +962,7 @@ while true do
 		updateLastAlivePlayer()
 		checkFallEliminations(arenaFloorY)
 		local currentAlive = getAliveCount()
+		updateAliveHud()
 		if shouldEndMatch(playersAtStart, currentAlive) then
 			break
 		end
@@ -709,25 +970,92 @@ while true do
 
 	-- STATE 4: ROUND OVER & PAYOUTS
 	local matchTime = survivalTimeValue.Value
-	local winner = resolveWinner(matchTime, playersAtStart)
-	RoundData.winner = winner
+	local isTeamMode = currentGameMode.Value == "Team"
+	local isJuggernautMode = currentGameMode.Value == "Juggernaut"
+	local winningTeam = nil
+	local winner = nil
+	local juggernautWon = false
 
-	if winner and winner.Parent then
+	if isTeamMode then
+		winningTeam = resolveWinningTeam(matchTime)
+		RoundData.winningTeam = winningTeam
+		RoundData.winner = nil
+		local winners = RoundData.getTeamPlayers(winningTeam)
 		pcall(function()
 			local PlayerStatsService = require(ServerScriptService:WaitForChild("PlayerStatsService"))
-			PlayerStatsService.addWin(winner)
-			winner:SetAttribute("StatWins", winner:FindFirstChild("TotalWins") and winner.TotalWins.Value or 0)
+			local winnerSet = {}
+			for _, p in ipairs(winners) do
+				winnerSet[p] = true
+				PlayerStatsService.addWin(p)
+				p:SetAttribute("StatWins", p:FindFirstChild("TotalWins") and p.TotalWins.Value or 0)
+			end
+			for player in pairs(RoundData.contestants) do
+				if player.Parent and not winnerSet[player] then
+					PlayerStatsService.resetWinStreak(player)
+				end
+			end
+		end)
+	elseif isJuggernautMode then
+		local jugg = RoundData.getJuggernaut()
+		juggernautWon = jugg ~= nil and isAliveContestant(jugg)
+		if juggernautWon then
+			winner = jugg
+			RoundData.winner = jugg
+			RoundData.winningTeam = nil
+			pcall(function()
+				local PlayerStatsService = require(ServerScriptService:WaitForChild("PlayerStatsService"))
+				PlayerStatsService.addWin(jugg)
+				jugg:SetAttribute("StatWins", jugg:FindFirstChild("TotalWins") and jugg.TotalWins.Value or 0)
+				for player in pairs(RoundData.contestants) do
+					if player ~= jugg and player.Parent then
+						PlayerStatsService.resetWinStreak(player)
+					end
+				end
+			end)
+		else
+			-- All hunters share the win when the juggernaut is dethroned
+			winner = nil
+			winningTeam = "Survivors"
+			RoundData.winner = nil
+			RoundData.winningTeam = "Survivors"
+			local hunters = RoundData.getHunterPlayers()
+			pcall(function()
+				local PlayerStatsService = require(ServerScriptService:WaitForChild("PlayerStatsService"))
+				local winnerSet = {}
+				for _, p in ipairs(hunters) do
+					winnerSet[p] = true
+					PlayerStatsService.addWin(p)
+					p:SetAttribute("StatWins", p:FindFirstChild("TotalWins") and p.TotalWins.Value or 0)
+				end
+				for player in pairs(RoundData.contestants) do
+					if player.Parent and not winnerSet[player] then
+						PlayerStatsService.resetWinStreak(player)
+					end
+				end
+			end)
+		end
+	else
+		winner = resolveWinner(matchTime, playersAtStart)
+		RoundData.winner = winner
+		RoundData.winningTeam = nil
+
+		if winner and winner.Parent then
+			pcall(function()
+				local PlayerStatsService = require(ServerScriptService:WaitForChild("PlayerStatsService"))
+				PlayerStatsService.addWin(winner)
+				winner:SetAttribute("StatWins", winner:FindFirstChild("TotalWins") and winner.TotalWins.Value or 0)
+			end)
+		end
+
+		pcall(function()
+			local PlayerStatsService = require(ServerScriptService:WaitForChild("PlayerStatsService"))
+			for player in pairs(RoundData.contestants) do
+				if player ~= winner and player.Parent then
+					PlayerStatsService.resetWinStreak(player)
+				end
+			end
 		end)
 	end
-
-	pcall(function()
-		local PlayerStatsService = require(ServerScriptService:WaitForChild("PlayerStatsService"))
-		for player in pairs(RoundData.contestants) do
-			if player ~= winner and player.Parent then
-				PlayerStatsService.resetWinStreak(player)
-			end
-		end
-	end)
 
 	local QuestService
 	pcall(function()
@@ -747,12 +1075,15 @@ while true do
 				awardSurvivalRewards(player, personalTime)
 				if QuestService then
 					QuestService.onSurvival(player, personalTime)
+					QuestService.onMatchPlayed(player)
 				end
 			end
 		end
 	end
 
 	teleportPlayers(playersToReturnToLobby, lobbySpawn)
+
+	clearAliveHud()
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		player:SetAttribute("InArena", nil)
@@ -768,6 +1099,19 @@ while true do
 		end
 	end
 
+	ShrinkService.stop()
+	ShrinkService.restoreAll()
+
+	-- Ensure every arena tile is back to base look after shrink/hazard paint
+	for _, tile in ipairs(getGridTiles(arenaGrid)) do
+		resetTile(tile)
+		tile.Anchored = true
+	end
+
+	RoundData.clearTeams()
+	RoundData.clearJuggernaut()
+	currentGameMode.Value = ""
+
 	local resetClient = ReplicatedStorage:FindFirstChild("ResetClientSponsors")
 	if resetClient then
 		resetClient:FireAllClients()
@@ -775,12 +1119,32 @@ while true do
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		local viewMode = RoundData.isParticipant(player) and "participant" or "spectator"
-		matchResultsEvent:FireClient(player, {
+		local payload = {
 			viewMode = viewMode,
-			winnerName = winner and winner.DisplayName or "Unknown",
-			winnerUserId = winner and winner.UserId or 0,
 			rewards = buildRewardsForPlayer(player),
-		})
+		}
+		if isTeamMode and winningTeam then
+			payload.winnerIsTeam = true
+			payload.winningTeam = winningTeam
+			payload.winnerName = winningTeam == "Blue" and "TEAM BLUE" or "TEAM RED"
+			payload.winnerUserId = 0
+		elseif isJuggernautMode and not juggernautWon then
+			payload.winnerIsTeam = true
+			payload.winningTeam = "Survivors"
+			payload.winnerName = "SURVIVORS"
+			payload.winnerUserId = 0
+		elseif isJuggernautMode and juggernautWon and winner then
+			payload.winnerIsTeam = false
+			payload.winningTeam = "Juggernaut"
+			payload.winnerName = winner.DisplayName
+			payload.winnerUserId = winner.UserId
+			payload.winnerIsJuggernaut = true
+		else
+			payload.winnerIsTeam = false
+			payload.winnerName = winner and winner.DisplayName or "Unknown"
+			payload.winnerUserId = winner and winner.UserId or 0
+		end
+		matchResultsEvent:FireClient(player, payload)
 	end
 
 	task.wait(2) 

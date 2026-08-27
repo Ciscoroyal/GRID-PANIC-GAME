@@ -32,6 +32,74 @@ local STYLE = {
 local selectedAbility = nil
 local abilityCards = {}
 
+local function setupPanelLayout()
+	-- Left grid / right detail split under the Top bar
+	abilityGrid.AnchorPoint = Vector2.new(0, 0)
+	abilityGrid.Position = UDim2.new(0.02, 0, 0.12, 0)
+	abilityGrid.Size = UDim2.new(0.58, 0, 0.84, 0)
+	abilityGrid.ScrollBarThickness = 6
+
+	local gridLayout = abilityGrid:FindFirstChildOfClass("UIGridLayout")
+	if gridLayout then
+		gridLayout.CellSize = UDim2.new(0.3, 0, 0.3, 0)
+		gridLayout.CellPadding = UDim2.new(0.025, 0, 0.035, 0)
+		gridLayout.FillDirection = Enum.FillDirection.Horizontal
+		gridLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		gridLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+		gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	end
+
+	local gridPad = abilityGrid:FindFirstChildOfClass("UIPadding")
+	if not gridPad then
+		gridPad = Instance.new("UIPadding")
+		gridPad.Parent = abilityGrid
+	end
+	gridPad.PaddingLeft = UDim.new(0.03, 0)
+	gridPad.PaddingRight = UDim.new(0.03, 0)
+	gridPad.PaddingTop = UDim.new(0.03, 0)
+	gridPad.PaddingBottom = UDim.new(0.03, 0)
+
+	abilityDetail.AnchorPoint = Vector2.new(1, 0)
+	abilityDetail.Position = UDim2.new(0.98, 0, 0.12, 0)
+	abilityDetail.Size = UDim2.new(0.36, 0, 0.84, 0)
+
+	detailName.AnchorPoint = Vector2.new(0.5, 0)
+	detailName.Position = UDim2.new(0.5, 0, 0.04, 0)
+	detailName.Size = UDim2.new(0.9, 0, 0.09, 0)
+	detailName.TextXAlignment = Enum.TextXAlignment.Center
+	detailName.TextYAlignment = Enum.TextYAlignment.Center
+	detailName.TextScaled = true
+
+	detailIcon.AnchorPoint = Vector2.new(0.5, 0)
+	detailIcon.Position = UDim2.new(0.5, 0, 0.15, 0)
+	detailIcon.Size = UDim2.new(0.58, 0, 0.38, 0)
+	local iconAspect = detailIcon:FindFirstChildOfClass("UIAspectRatioConstraint")
+	if not iconAspect then
+		iconAspect = Instance.new("UIAspectRatioConstraint")
+		iconAspect.Parent = detailIcon
+	end
+	iconAspect.AspectRatio = 1
+
+	detailDesc.AnchorPoint = Vector2.new(0.5, 0)
+	detailDesc.Position = UDim2.new(0.5, 0, 0.56, 0)
+	detailDesc.Size = UDim2.new(0.9, 0, 0.22, 0)
+	detailDesc.TextWrapped = true
+	detailDesc.TextScaled = true
+	detailDesc.TextXAlignment = Enum.TextXAlignment.Center
+	detailDesc.TextYAlignment = Enum.TextYAlignment.Top
+	local descConstraint = detailDesc:FindFirstChildOfClass("UITextSizeConstraint")
+	if not descConstraint then
+		descConstraint = Instance.new("UITextSizeConstraint")
+		descConstraint.Parent = detailDesc
+	end
+	descConstraint.MaxTextSize = 18
+	descConstraint.MinTextSize = 11
+
+	actionBtn.AnchorPoint = Vector2.new(0.5, 1)
+	actionBtn.Position = UDim2.new(0.5, 0, 0.96, 0)
+	actionBtn.Size = UDim2.new(0.82, 0, 0.12, 0)
+end
+
 local function showToast(message)
 	local existing = currentAbilityGui:FindFirstChild("CurrentAbilityToast")
 	if existing then existing:Destroy() end
@@ -198,6 +266,7 @@ local function buildAbilityGrid()
 		local card = template:Clone()
 		card.Name = abilityName
 		card.Visible = true
+		card.Size = UDim2.new(1, 0, 1, 0)
 		card.LayoutOrder = data.Cost or 0
 		UIHelpers.setAbilityImage(card, abilityName)
 		card.Parent = abilityGrid
@@ -205,6 +274,7 @@ local function buildAbilityGrid()
 		card.Activated:Connect(function()
 			updateDetailPanel(abilityName)
 		end)
+		UIHelpers.bindButtonHover(card)
 
 		abilityCards[abilityName] = card
 	end
@@ -223,30 +293,27 @@ end
 
 local function setPanelVisible(isVisible)
 	if isVisible and not canShowPanel() then
-		panelFrame.Visible = false
+		UIHelpers.bindButtonHover(closeBtn)
+UIHelpers.bindButtonHover(actionBtn)
+
+panelFrame.Visible = false
 		return
 	end
 
-	panelFrame.Visible = isVisible
 	if isVisible then
-		panelFrame.Position = UDim2.new(0.5, 0, 0.56, 0)
-		panelFrame:TweenPosition(
-			UDim2.new(0.5, 0, 0.5, 0),
-			Enum.EasingDirection.Out,
-			Enum.EasingStyle.Back,
-			0.35,
-			true
-		)
-
+		UIHelpers.animatePanelOpen(panelFrame)
 		local equipped = localPlayer:GetAttribute("EquippedAbility")
 		if type(equipped) == "string" and AbilityData[equipped] then
 			updateDetailPanel(equipped)
 		elseif selectedAbility then
 			refreshAllCards()
 		end
+	else
+		UIHelpers.animatePanelClose(panelFrame)
 	end
 end
 
+setupPanelLayout()
 buildAbilityGrid()
 
 local firstAbility = localPlayer:GetAttribute("EquippedAbility")

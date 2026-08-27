@@ -11,14 +11,31 @@ local STAND_DURATION = 2
 local platformCheckInterval = 0.1
 local standingPlayers = {}
 
+local function hideDefaultNameTag(character)
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	humanoid.NameDisplayDistance = 0
+	humanoid.HealthDisplayDistance = 0
+end
+
 local function updateAfkTag(player)
 	local character = player.Character
-	local head = character and character:FindFirstChild("Head")
-	if not head then
+	if not character then
 		return
 	end
 
-	local existing = head:FindFirstChild("AFKTag")
+	hideDefaultNameTag(character)
+
+	-- Attach to body root so StudsOffset is relative to the character, not the head mesh.
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then
+		return
+	end
+
+	local existing = root:FindFirstChild("AFKTag") or character:FindFirstChild("AFKTag", true)
 	if existing then
 		existing:Destroy()
 	end
@@ -26,8 +43,12 @@ local function updateAfkTag(player)
 	if player:GetAttribute("IsAFK") == true then
 		local tag = afkTagTemplate:Clone()
 		tag.Name = "AFKTag"
-		tag.Adornee = head
-		tag.Parent = head
+		tag.Adornee = root
+		tag.Enabled = true
+		-- Keep on the body (HRP center), not floating above the head.
+		tag.StudsOffset = Vector3.zero
+		tag.StudsOffsetWorldSpace = Vector3.zero
+		tag.Parent = root
 	end
 end
 
@@ -111,6 +132,24 @@ Players.PlayerAdded:Connect(function(player)
 		updateAfkTag(player)
 	end)
 end)
+
+for _, player in ipairs(Players:GetPlayers()) do
+	player.CharacterAdded:Connect(function()
+		task.defer(function()
+			updateAfkTag(player)
+		end)
+	end)
+
+	player:GetAttributeChangedSignal("IsAFK"):Connect(function()
+		updateAfkTag(player)
+	end)
+
+	if player.Character then
+		task.defer(function()
+			updateAfkTag(player)
+		end)
+	end
+end
 
 local arena = Workspace:FindFirstChild("arena")
 local practicePlatform = arena and arena:FindFirstChild("PracticePlatform")

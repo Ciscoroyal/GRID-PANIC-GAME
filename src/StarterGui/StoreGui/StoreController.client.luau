@@ -1,4 +1,7 @@
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local UIHelpers = require(ReplicatedStorage:WaitForChild("UIHelpers"))
 
 local localPlayer = Players.LocalPlayer
 local storeGui = script.Parent
@@ -22,9 +25,13 @@ local currentTab = "SHOP"
 
 local function setTabHighlight(activeName)
 	for _, button in ipairs({ cratesBtn, shopBtn }) do
+		local active = button.Name == activeName
+		-- Match Ability kit: white face + white extruded Frame
+		button.BackgroundColor3 = active and Color3.new(1, 1, 1) or Color3.fromRGB(76, 78, 99)
 		local frame = button:FindFirstChild("Frame")
 		if frame then
-			frame.BackgroundTransparency = button.Name == activeName and 0 or 0.35
+			frame.BackgroundColor3 = Color3.new(1, 1, 1)
+			frame.BackgroundTransparency = active and 0 or 0.35
 		end
 	end
 end
@@ -46,9 +53,21 @@ local function setTab(tabName)
 	setTabHighlight(tabName)
 end
 
+local function canShowLobbyPanel()
+	if localPlayer:GetAttribute("InPractice") == true then
+		return true
+	end
+	if localPlayer:GetAttribute("InArena") ~= true then
+		return true
+	end
+	if localPlayer:GetAttribute("IsEliminated") == true then
+		return true
+	end
+	return false
+end
+
 local function setStoreVisible(isVisible, tabName)
-	if localPlayer:GetAttribute("InArena") == true then
-		storeFrame.Visible = false
+	if isVisible and not canShowLobbyPanel() then
 		return
 	end
 
@@ -56,16 +75,10 @@ local function setStoreVisible(isVisible, tabName)
 		setTab(tabName)
 	end
 
-	storeFrame.Visible = isVisible
 	if isVisible then
-		storeFrame.Position = UDim2.new(0.5, 0, 0.56, 0)
-		storeFrame:TweenPosition(
-			UDim2.new(0.5, 0, 0.5, 0),
-			Enum.EasingDirection.Out,
-			Enum.EasingStyle.Back,
-			0.35,
-			true
-		)
+		UIHelpers.animatePanelOpen(storeFrame)
+	else
+		UIHelpers.animatePanelClose(storeFrame)
 	end
 end
 

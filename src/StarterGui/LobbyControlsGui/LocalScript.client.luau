@@ -2,6 +2,8 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SocialService = game:GetService("SocialService")
 
+local UIHelpers = require(ReplicatedStorage:WaitForChild("UIHelpers"))
+
 local localPlayer = Players.LocalPlayer
 local gui = script.Parent
 local practiceBtn = gui:WaitForChild("PracticeButton")
@@ -11,12 +13,22 @@ local afkEvent = ReplicatedStorage:WaitForChild("AFKEvent")
 local practiceEvent = ReplicatedStorage:WaitForChild("PracticeEvent")
 
 local STYLE = {
-	PRACTICE = Color3.fromRGB(0, 170, 85),
 	RETURN = Color3.fromRGB(255, 120, 0),
 	AFK_ON = Color3.fromRGB(210, 60, 60),
-	AFK_OFF = Color3.fromRGB(90, 92, 105),
 	FRIEND = Color3.fromRGB(60, 120, 255),
 }
+
+-- Keep the Studio-authored idle greens; only swap colors when toggled on.
+local function getIdleColor(button)
+	local frame = button:FindFirstChild("Frame")
+	if frame then
+		return frame.BackgroundColor3
+	end
+	return button.BackgroundColor3
+end
+
+local practiceIdleColor = getIdleColor(practiceBtn)
+local afkIdleColor = getIdleColor(afkBtn)
 
 local isAFK = false
 local inPractice = false
@@ -53,7 +65,7 @@ local function updatePracticeButton()
 		setButtonColor(practiceBtn, STYLE.RETURN)
 	else
 		setButtonTitle(practiceBtn, "PRACTICE")
-		setButtonColor(practiceBtn, STYLE.PRACTICE)
+		setButtonColor(practiceBtn, practiceIdleColor)
 	end
 end
 
@@ -63,7 +75,7 @@ local function updateAfkButton()
 		setButtonColor(afkBtn, STYLE.AFK_ON)
 	else
 		setButtonTitle(afkBtn, "AFK OFF")
-		setButtonColor(afkBtn, STYLE.AFK_OFF)
+		setButtonColor(afkBtn, afkIdleColor)
 	end
 end
 
@@ -99,4 +111,10 @@ if friendBtn then
 			SocialService:PromptGameInvite(localPlayer)
 		end)
 	end)
+end
+
+UIHelpers.bindButtonHover(practiceBtn)
+UIHelpers.bindButtonHover(afkBtn)
+if friendBtn then
+	UIHelpers.bindButtonHover(friendBtn)
 end

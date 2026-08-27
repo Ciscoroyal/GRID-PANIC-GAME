@@ -1,10 +1,10 @@
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService") 
+local TweenService = game:GetService("TweenService")
 local Players = game:GetService("Players")
-local Debris = game:GetService("Debris") -- Added for VFX/SFX cleanup
-
+local Debris = game:GetService("Debris")
 local PlayerSettings = require(ReplicatedStorage:WaitForChild("PlayerSettings"))
+local DashCollision = require(ReplicatedStorage:WaitForChild("DashCollision"))
 
 local localPlayer = Players.LocalPlayer
 PlayerSettings.ensure(localPlayer)
@@ -15,12 +15,8 @@ local gameAssets = ReplicatedStorage:FindFirstChild("GameAssets")
 local swooshTemplate = gameAssets and gameAssets:FindFirstChild("Sounds") and gameAssets.Sounds:FindFirstChild("DashSwoosh")
 local dustTemplate = gameAssets and gameAssets:FindFirstChild("Particles") and gameAssets.Particles:FindFirstChild("DashDust")
 
-local dashAnimation = Instance.new("Animation")
-dashAnimation.AnimationId = "rbxassetid://77329448433602"
-
 local CLIENT_SPAM_GUARD = 0.15
 local lastUseTime = 0
-
 local function isAbilityOnCooldown()
 	local cooldownEnd = localPlayer:GetAttribute("AbilityCooldownEnd")
 	if not cooldownEnd then return false end
@@ -52,9 +48,6 @@ local function waitForAbilityAccepted(previousCooldownEnd, timeout)
 	return accepted
 end
 
--- =========================================================
--- HELPER: LOCAL HIT DETECTION (Fixes the pushing bug!)
--- =========================================================
 local function getLocalTarget(character, range)
 	local root = character:FindFirstChild("HumanoidRootPart")
 	if not root then return nil, range end
@@ -92,8 +85,8 @@ local function performDashStrike()
 		return
 	end
 
-	local targetChar, distToTarget = getLocalTarget(character, 15)
-	local dashDistance = 10
+	local targetChar, distToTarget = getLocalTarget(character, 30)
+	local dashDistance = 15
 
 	if targetChar then
 		local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
@@ -101,16 +94,6 @@ local function performDashStrike()
 			dashDistance = math.max(0, distToTarget - 4)
 		else
 			dashDistance = distToTarget
-		end
-	end
-
-	local humanoid = character:FindFirstChild("Humanoid")
-	if humanoid then
-		local animator = humanoid:FindFirstChild("Animator")
-		if animator then
-			local dashTrack = animator:LoadAnimation(dashAnimation)
-			dashTrack.Priority = Enum.AnimationPriority.Action
-			dashTrack:Play()
 		end
 	end
 
@@ -151,23 +134,38 @@ local function performDashStrike()
 		end)
 	end
 
-	local dashVelocity = rootPart.CFrame.LookVector
-	local targetCFrame = rootPart.CFrame + (dashVelocity * dashDistance)
+	local dashVelocity = Vector3.new(rootPart.CFrame.LookVector.X, 0, rootPart.CFrame.LookVector.Z)
+	if dashVelocity.Magnitude < 0.001 then
+		dashVelocity = rootPart.CFrame.LookVector
+	else
+		dashVelocity = dashVelocity.Unit
+	end
 
-	local tweenInfo = TweenInfo.new(
-		0.25,
-		Enum.EasingStyle.Quad,
-		Enum.EasingDirection.Out
-	)
-	local dashTween = TweenService:Create(rootPart, tweenInfo, {CFrame = targetCFrame})
-	dashTween:Play()
+	DashCollision.applyPhysicsDash(rootPart, dashVelocity, dashDistance, 0.25)
+end
+
+local function getCurrentModeId()
+	local modeValue = ReplicatedStorage:FindFirstChild("CurrentGameMode")
+	return modeValue and modeValue.Value or ""
+end
+
+local function abilitiesAllowed()
+	return getCurrentModeId() ~= "PureSurvival"
+end
+
+local function getActiveAbility()
+	if getCurrentModeId() == "PunchOut" then
+		return "Grid Punch"
+	end
+	return localPlayer:GetAttribute("EquippedAbility")
 end
 
 local function triggerAbility()
 	if localPlayer:GetAttribute("InArena") ~= true then return end
 	if localPlayer:GetAttribute("IsEliminated") == true then return end
+	if not abilitiesAllowed() then return end
 
-	local equippedAbility = localPlayer:GetAttribute("EquippedAbility")
+	local equippedAbility = getActiveAbility()
 	if not equippedAbility or equippedAbility == "None" then return end
 
 	if isAbilityOnCooldown() then
@@ -179,6 +177,7 @@ local function triggerAbility()
 
 	lastUseTime = currentTime
 	local previousCooldownEnd = localPlayer:GetAttribute("AbilityCooldownEnd")
+
 	useAbilityEvent:FireServer(equippedAbility)
 
 	if equippedAbility == "Dash Strike" and waitForAbilityAccepted(previousCooldownEnd) then
@@ -186,11 +185,8 @@ local function triggerAbility()
 	end
 end
 
--- =========================================================
--- KEYBOARD INPUT ('E')
--- =========================================================
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
-	if gameProcessed then return end 
+	if gameProcessed then return end
 
 	if input.KeyCode == Enum.KeyCode.E then
 		if localPlayer:GetAttribute("IsEliminated") == true then
@@ -200,9 +196,6 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 end)
 
--- =========================================================
--- MOBILE BUTTON SUPPORT
--- =========================================================
 local function getAbilityButton(mobileGui)
 	for _, child in ipairs(mobileGui:GetChildren()) do
 		if child.Name == "AbilityButton" and child:IsA("ImageButton") then
@@ -245,6 +238,12 @@ local function refreshEquippedAbilityIcon(abilityImage)
 	if not abilityImage then
 		return
 	end
+	local abilityName = getActiveAbility()
+	if abilityName and abilityName ~= "None" then
+		UIHelpers.setAbilityImage(abilityImage, abilityName)
+	else
+		abilityImage.Image = ""
+	end
 	abilityImage.Visible = true
 end
 
@@ -272,6 +271,12 @@ local function bindMobileAbilityButton(mobileGui)
 	localPlayer:GetAttributeChangedSignal("EquippedAbility"):Connect(function()
 		refreshEquippedAbilityIcon(abilityImage)
 	end)
+	local modeValue = ReplicatedStorage:FindFirstChild("CurrentGameMode")
+	if modeValue then
+		modeValue.Changed:Connect(function()
+			refreshEquippedAbilityIcon(abilityImage)
+		end)
+	end
 
 	local function refreshAbilityButton()
 		if localPlayer:GetAttribute("InArena") ~= true then

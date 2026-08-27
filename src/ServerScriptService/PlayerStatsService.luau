@@ -25,6 +25,8 @@ local fansBoard = DataStoreService:GetOrderedDataStore("GridPanic_Fans_V1")
 
 local PlayerStatsService = {}
 local loaded = {}
+local boardDirty = {}
+local flushScheduled = {}
 
 local function ensureValues(player)
 	local wins = player:FindFirstChild("TotalWins")
@@ -49,14 +51,20 @@ local function ensureValues(player)
 end
 
 local function pushOrdered(store, userId, value)
-	if value <= 0 then return end
+	if value <= 0 then
+		return
+	end
 	pcall(function()
 		store:SetAsync(tostring(userId), value)
 	end)
 end
 
-local function syncBoards(player)
-	scheduleLeaderboardRefresh()
+local function flushOrderedBoards(player)
+	if not player or not loaded[player] then
+		return
+	end
+
+	boardDirty[player] = nil
 	local wins, kills = ensureValues(player)
 	local fans = player:FindFirstChild("AllTimeFans")
 	pushOrdered(winsBoard, player.UserId, wins.Value)
@@ -64,10 +72,31 @@ local function syncBoards(player)
 	if fans then
 		pushOrdered(fansBoard, player.UserId, fans.Value)
 	end
+	scheduleLeaderboardRefresh()
+end
+
+local function markBoardsDirty(player)
+	boardDirty[player] = true
+	scheduleLeaderboardRefresh()
+end
+
+-- Batch OrderedDataStore writes so kills/fans don't hammer budget every change.
+local function scheduleBoardFlush(player, delaySeconds)
+	markBoardsDirty(player)
+	if flushScheduled[player] then
+		return
+	end
+	flushScheduled[player] = true
+	task.delay(delaySeconds or 5, function()
+		flushScheduled[player] = nil
+		if player.Parent and boardDirty[player] then
+			flushOrderedBoards(player)
+		end
+	end)
 end
 
 function PlayerStatsService.load(player)
-	local wins, kills = ensureValues(player)
+	local wins, kills, streak = ensureValues(player)
 	local success, data = pcall(function()
 		return statsStore:GetAsync(player.UserId)
 	end)
@@ -84,23 +113,25 @@ function PlayerStatsService.load(player)
 	player:SetAttribute("StatWins", wins.Value)
 	player:SetAttribute("StatKills", kills.Value)
 	player:SetAttribute("WinStreak", streak.Value)
-	syncBoards(player)
-	scheduleLeaderboardRefresh()
+
+	-- One ordered write on join keeps boards healthy without per-kill spam.
+	flushOrderedBoards(player)
 
 	task.spawn(function()
 		local fans = player:WaitForChild("AllTimeFans", 20)
 		if fans then
-			syncBoards(player)
-	scheduleLeaderboardRefresh()
+			flushOrderedBoards(player)
 			fans:GetPropertyChangedSignal("Value"):Connect(function()
-				syncBoards(player)
+				scheduleBoardFlush(player, 5)
 			end)
 		end
 	end)
 end
 
 function PlayerStatsService.save(player)
-	if not loaded[player] then return end
+	if not loaded[player] then
+		return
+	end
 	local wins, kills, streak = ensureValues(player)
 	pcall(function()
 		statsStore:SetAsync(player.UserId, {
@@ -109,6 +140,7 @@ function PlayerStatsService.save(player)
 			winStreak = streak.Value,
 		})
 	end)
+	flushOrderedBoards(player)
 end
 
 function PlayerStatsService.addWin(player)
@@ -117,9 +149,12 @@ function PlayerStatsService.addWin(player)
 	streak.Value += 1
 	player:SetAttribute("StatWins", wins.Value)
 	player:SetAttribute("WinStreak", streak.Value)
-	syncBoards(player)
-	scheduleLeaderboardRefresh()
+	-- Wins are rare; flush immediately so podiums update promptly.
 	PlayerStatsService.save(player)
+	pcall(function()
+		local QuestService = require(game:GetService("ServerScriptService"):WaitForChild("QuestService"))
+		QuestService.onWin(player)
+	end)
 end
 
 function PlayerStatsService.resetWinStreak(player)
@@ -133,13 +168,11 @@ function PlayerStatsService.addKill(player)
 	local _, kills = ensureValues(player)
 	kills.Value += 1
 	player:SetAttribute("StatKills", kills.Value)
-	syncBoards(player)
-	scheduleLeaderboardRefresh()
+	scheduleBoardFlush(player, 5)
 end
 
 function PlayerStatsService.syncFans(player)
-	syncBoards(player)
-	scheduleLeaderboardRefresh()
+	scheduleBoardFlush(player, 5)
 end
 
 function PlayerStatsService.getSnapshot(player)
@@ -198,6 +231,8 @@ end)
 Players.PlayerRemoving:Connect(function(player)
 	PlayerStatsService.save(player)
 	loaded[player] = nil
+	boardDirty[player] = nil
+	flushScheduled[player] = nil
 end)
 
 for _, player in ipairs(Players:GetPlayers()) do
@@ -212,3 +247,4 @@ game:BindToClose(function()
 end)
 
 return PlayerStatsService
+

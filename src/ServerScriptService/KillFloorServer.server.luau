@@ -2,7 +2,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
-local KillFeedService = require(ServerScriptService:WaitForChild("KillFeedService"))
+local EliminationService = require(ServerScriptService:WaitForChild("EliminationService"))
 
 local killFloor = workspace:WaitForChild("KillFloor")
 killFloor.CanCollide = false
@@ -13,17 +13,10 @@ local recent = {}
 
 local function eliminateFromFall(player)
 	if not player or not player.Parent then return end
-	if player:GetAttribute("InArena") ~= true then return end
-	if player:GetAttribute("IsEliminated") == true then return end
 	if recent[player] then return end
 
 	recent[player] = true
-	KillFeedService.setPendingCause(player, "fall")
-
-	local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-	if humanoid and humanoid.Health > 0 then
-		humanoid.Health = 0
-	end
+	EliminationService.eliminate(player, { cause = "fall", respectShield = false })
 
 	task.delay(0.5, function()
 		recent[player] = nil
