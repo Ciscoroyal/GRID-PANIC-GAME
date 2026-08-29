@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local UIHelpers = require(ReplicatedStorage:WaitForChild("UIHelpers"))
+local Audio = require(ReplicatedStorage:WaitForChild("Audio"))
 local AbilityData = require(ReplicatedStorage:WaitForChild("AbilityData"))
 local EquipAbilityEvent = ReplicatedStorage:WaitForChild("EquipAbilityEvent")
 local survivalTimeValue = ReplicatedStorage:WaitForChild("SurvivalTime")
@@ -164,16 +165,18 @@ local function getActionLabel(abilityName, data)
 	return "BUY " .. data.Cost
 end
 
+-- Selected cards keep their coloured highlight; unselected ones show no
+-- outline at all, since the ability artwork already has its own border.
 local function highlightCard(abilityName)
 	for name, card in pairs(abilityCards) do
 		local stroke = card:FindFirstChildOfClass("UIStroke")
 		if stroke then
 			if name == abilityName then
-				stroke.Color = AbilityData[abilityName].Color or STYLE.GOLD
+				local data = AbilityData[abilityName]
+				stroke.Color = (data and data.Color) or STYLE.GOLD
 				stroke.Thickness = 3
 			else
-				stroke.Color = Color3.fromRGB(0, 0, 0)
-				stroke.Thickness = 1.5
+				stroke.Thickness = 0
 			end
 		end
 	end
@@ -262,6 +265,8 @@ local function buildAbilityGrid()
 
 	for abilityName, data in pairs(AbilityData) do
 		if type(data) ~= "table" then continue end
+		-- Disabled abilities are not offered at all.
+		if not AbilityData.isEnabled(abilityName) then continue end
 
 		local card = template:Clone()
 		card.Name = abilityName
@@ -293,17 +298,13 @@ end
 
 local function setPanelVisible(isVisible)
 	if isVisible and not canShowPanel() then
-		UIHelpers.bindButtonHover(closeBtn)
-UIHelpers.bindButtonHover(actionBtn)
-
-panelFrame.Visible = false
 		return
 	end
 
 	if isVisible then
 		UIHelpers.animatePanelOpen(panelFrame)
 		local equipped = localPlayer:GetAttribute("EquippedAbility")
-		if type(equipped) == "string" and AbilityData[equipped] then
+		if type(equipped) == "string" and AbilityData.isEnabled(equipped) then
 			updateDetailPanel(equipped)
 		elseif selectedAbility then
 			refreshAllCards()
@@ -316,14 +317,16 @@ end
 setupPanelLayout()
 buildAbilityGrid()
 
+-- These two were stranded inside setPanelVisible's blocked-open branch, so the
+-- buy/equip button and the close button only ever gained hover feedback if a
+-- player happened to try opening the panel mid-match first.
+UIHelpers.bindButtonHover(closeBtn)
+UIHelpers.bindButtonHover(actionBtn)
+panelFrame.Visible = false
+
 local firstAbility = localPlayer:GetAttribute("EquippedAbility")
-if type(firstAbility) ~= "string" or not AbilityData[firstAbility] then
-	for abilityName, data in pairs(AbilityData) do
-		if type(data) == "table" then
-			firstAbility = abilityName
-			break
-		end
-	end
+if type(firstAbility) ~= "string" or not AbilityData.isEnabled(firstAbility) then
+	firstAbility = AbilityData.getDefaultAbility()
 end
 if firstAbility then
 	updateDetailPanel(firstAbility)
@@ -339,10 +342,16 @@ actionBtn.Activated:Connect(function()
 	local data = AbilityData[selectedAbility]
 	if not data then return end
 
-	if data.Cost > 0 and localPlayer:GetAttribute(AbilityData.getOwnedAttributeKey(selectedAbility)) ~= true then
+	-- Captured before the server call: afterwards the owned attribute is set and
+	-- a purchase is indistinguishable from a plain equip.
+	local isPurchase = data.Cost > 0
+		and localPlayer:GetAttribute(AbilityData.getOwnedAttributeKey(selectedAbility)) ~= true
+
+	if isPurchase then
 		local leaderstats = localPlayer:FindFirstChild("leaderstats")
 		local coins = leaderstats and leaderstats:FindFirstChild("Coins")
 		if not coins or coins.Value < data.Cost then
+			Audio.play("PurchaseDenied")
 			setActionLabel("NOT ENOUGH COINS", "error")
 			task.delay(1, function()
 				updateDetailPanel(selectedAbility)
@@ -354,12 +363,18 @@ actionBtn.Activated:Connect(function()
 	EquipAbilityEvent:FireServer(selectedAbility)
 
 	if waitForActionSuccess(selectedAbility, 3) then
+		-- A plain equip already got the generic click sound; only a real spend
+		-- earns the purchase chime.
+		if isPurchase then
+			Audio.play("Purchase")
+		end
 		setActionLabel("EQUIPPED", "equipped")
 		refreshAllCards()
 		task.delay(0.5, function()
 			updateDetailPanel(selectedAbility)
 		end)
 	else
+		Audio.play("PurchaseDenied")
 		setActionLabel("FAILED", "error")
 		task.delay(1, function()
 			updateDetailPanel(selectedAbility)
@@ -381,6 +396,7 @@ end)
 
 for abilityName, data in pairs(AbilityData) do
 	if type(data) ~= "table" then continue end
+	if not AbilityData.isEnabled(abilityName) then continue end
 	localPlayer:GetAttributeChangedSignal(AbilityData.getOwnedAttributeKey(abilityName)):Connect(refreshAllCards)
 end
 

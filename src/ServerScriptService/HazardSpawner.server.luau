@@ -11,6 +11,9 @@ local RoundData = require(ReplicatedStorage:WaitForChild("RoundData"))
 local LevelService = require(ServerScriptService:WaitForChild("LevelService"))
 local VoteService = require(ServerScriptService:WaitForChild("VoteService"))
 local ShrinkService = require(ServerScriptService:WaitForChild("ShrinkService"))
+local HazardHitService = require(ServerScriptService:WaitForChild("HazardHitService"))
+local LobbySpawnService = require(ServerScriptService:WaitForChild("LobbySpawnService"))
+local WinnerDisplayService = require(ServerScriptService:WaitForChild("WinnerDisplayService"))
 local matchResultsEvent = ReplicatedStorage:WaitForChild("MatchResultsEvent")
 local currentGameMode = ReplicatedStorage:WaitForChild("CurrentGameMode")
 
@@ -425,6 +428,115 @@ local function teleportTeamsOppositeSides(contestants, tiles, fallbackPart)
 	placeTeam(reds, redX)
 end
 
+--[[
+	Spread contestants evenly around a circle near the arena edge, all facing the
+	centre, instead of stacking everyone on ArenaSpawn. Each slot snaps to the top
+	of the closest unused tile so nobody spawns over a gap or inside a neighbour.
+]]
+local function teleportPlayersInRing(contestants, tiles, fallbackPart, centrePlayer)
+	local count = #contestants
+	if count == 0 then
+		return
+	end
+
+	local minX, maxX, minZ, maxZ, y = getArenaBounds(tiles, fallbackPart)
+	local centerX = (minX + maxX) / 2
+	local centerZ = (minZ + maxZ) / 2
+	local halfSpan = math.min(maxX - minX, maxZ - minZ) / 2
+	-- Tighter than the old 0.7: at 0.7 players started too far apart to threaten
+	-- each other early in the round.
+	local radius = math.max(6, halfSpan * 0.5)
+
+	local usedTiles = {}
+
+	-- The juggernaut starts dead centre, surrounded by the hunters.
+	local ringPlayers = contestants
+	if centrePlayer then
+		ringPlayers = {}
+		for _, player in ipairs(contestants) do
+			if player ~= centrePlayer then
+				table.insert(ringPlayers, player)
+			end
+		end
+	end
+	local function nearestFreeTile(position)
+		local bestTile, bestDist = nil, math.huge
+		for _, tile in ipairs(tiles) do
+			if not usedTiles[tile] then
+				local dx = tile.Position.X - position.X
+				local dz = tile.Position.Z - position.Z
+				local dist = (dx * dx) + (dz * dz)
+				if dist < bestDist then
+					bestDist = dist
+					bestTile = tile
+				end
+			end
+		end
+		return bestTile
+	end
+
+	if centrePlayer then
+		local character = centrePlayer.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if root then
+			local pos = Vector3.new(centerX, y, centerZ)
+			local tile = nearestFreeTile(pos)
+			if tile then
+				usedTiles[tile] = true
+				pos = Vector3.new(
+					tile.Position.X,
+					tile.Position.Y + (tile.Size.Y / 2) + 3,
+					tile.Position.Z
+				)
+			end
+			root.CFrame = CFrame.new(pos)
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+
+	local ringCount = #ringPlayers
+	if ringCount == 0 then
+		return
+	end
+
+	-- Random offset so the same player is not always in the same seat.
+	local angleOffset = math.random() * math.pi * 2
+	local angleStep = (math.pi * 2) / ringCount
+
+	for i, player in ipairs(ringPlayers) do
+		local character = player.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if root then
+			local angle = angleOffset + (angleStep * (i - 1))
+			local pos = Vector3.new(
+				centerX + (math.cos(angle) * radius),
+				y,
+				centerZ + (math.sin(angle) * radius)
+			)
+
+			local tile = nearestFreeTile(pos)
+			if tile then
+				usedTiles[tile] = true
+				pos = Vector3.new(
+					tile.Position.X,
+					tile.Position.Y + (tile.Size.Y / 2) + 3,
+					tile.Position.Z
+				)
+			end
+
+			local lookAt = Vector3.new(centerX, pos.Y, centerZ)
+			if (Vector3.new(lookAt.X, 0, lookAt.Z) - Vector3.new(pos.X, 0, pos.Z)).Magnitude < 0.1 then
+				lookAt = pos + Vector3.new(0, 0, 1)
+			end
+
+			root.CFrame = CFrame.lookAt(pos, lookAt)
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+end
+
 local function getAliveTeamCounts()
 	local blue, red = 0, 0
 	for _, player in ipairs(Players:GetPlayers()) do
@@ -553,41 +665,64 @@ local function resolveWinningTeam(matchTime)
 	return TEAM_BLUE
 end
 
+-- Eliminations landing within this window are treated as one event, not a race.
+local SIMULTANEOUS_DEATH_WINDOW = 0.15
+
+--[[
+	Returns winner, isDraw.
+
+	When a single block catches the last players standing together they are all
+	eliminated on the same tick, so their survival times are identical and the
+	old "highest time wins" scan just returned whichever the hash order reached
+	first - crowning someone who died at the same instant as everyone else.
+	That case is now a draw.
+]]
 local function resolveWinner(matchTime, playersAtStart)
+	-- Anyone still standing wins outright.
 	for _, player in ipairs(Players:GetPlayers()) do
 		if isAliveContestant(player) and RoundData.didPlay(player) then
-			return player
+			return player, false
 		end
 	end
 
-	if lastAlivePlayer and lastAlivePlayer.Parent and RoundData.didPlay(lastAlivePlayer) then
-		return lastAlivePlayer
-	end
-
-	local bestPlayer = nil
 	local bestTime = -1
 	for player in pairs(RoundData.contestants) do
 		local survivalTime = eliminationTimes[player] or matchTime
 		if survivalTime > bestTime then
 			bestTime = survivalTime
-			bestPlayer = player
 		end
 	end
-	if bestPlayer then
-		return bestPlayer
+
+	local tied = {}
+	for player in pairs(RoundData.contestants) do
+		local survivalTime = eliminationTimes[player] or matchTime
+		if math.abs(survivalTime - bestTime) <= SIMULTANEOUS_DEATH_WINDOW then
+			table.insert(tied, player)
+		end
+	end
+
+	if #tied > 1 then
+		return nil, true
+	end
+	if tied[1] then
+		return tied[1], false
+	end
+
+	if lastAlivePlayer and lastAlivePlayer.Parent and RoundData.didPlay(lastAlivePlayer) then
+		return lastAlivePlayer, false
 	end
 
 	if #eliminationOrder > 0 then
-		return eliminationOrder[#eliminationOrder]
+		return eliminationOrder[#eliminationOrder], false
 	end
 
 	if playersAtStart == 1 then
 		for player in pairs(RoundData.contestants) do
-			return player
+			return player, false
 		end
 	end
 
-	return nil
+	return nil, false
 end
 
 local function awardSurvivalRewards(player, survivalTime)
@@ -605,13 +740,241 @@ local function awardSurvivalRewards(player, survivalTime)
 	}
 end
 
--- Teleport helper function
-local function teleportPlayers(playersList, targetPart)
-	for _, player in ipairs(playersList) do
-		if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-			player.Character.HumanoidRootPart.CFrame = targetPart.CFrame * CFrame.new(0, 3, 0)
+-- =========================================================
+-- PRE-MATCH LOCK
+-- Players are frozen from the moment they land in the arena until the roll
+-- call UI disappears, so nobody can walk, jump, dash, punch or use an ability
+-- while the line-up is still on screen. Client scripts read the MatchLocked
+-- attribute; the humanoid changes below are the server-side enforcement.
+-- Keep this matched to the hide delay in StarterGui.RollCallGui.RollCallController.
+-- =========================================================
+local ROLL_CALL_DISPLAY_SECONDS = 3.2
+
+local frozenMovement = {}
+
+local function getStarterWalkSpeed()
+	local speed = game:GetService("StarterPlayer").CharacterWalkSpeed
+	if typeof(speed) ~= "number" or speed <= 0 then
+		speed = 16
+	end
+	return speed
+end
+
+local function applyFreeze(player)
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+
+	if not frozenMovement[player] then
+		frozenMovement[player] = {
+			walkSpeed = humanoid.WalkSpeed,
+			jumpPower = humanoid.JumpPower,
+			jumpHeight = humanoid.JumpHeight,
+		}
+	end
+
+	humanoid.WalkSpeed = 0
+	humanoid.JumpPower = 0
+	humanoid.JumpHeight = 0
+end
+
+local function lockContestants(contestants)
+	for _, player in ipairs(contestants) do
+		player:SetAttribute("MatchLocked", true)
+		applyFreeze(player)
+	end
+end
+
+local function releaseContestant(player)
+	player:SetAttribute("MatchLocked", nil)
+
+	local saved = frozenMovement[player]
+	frozenMovement[player] = nil
+
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+
+	local starterPlayer = game:GetService("StarterPlayer")
+
+	local walkSpeed = saved and saved.walkSpeed or nil
+	if typeof(walkSpeed) ~= "number" or walkSpeed <= 0 then
+		walkSpeed = getStarterWalkSpeed()
+	end
+
+	local jumpPower = saved and saved.jumpPower or nil
+	if typeof(jumpPower) ~= "number" or jumpPower <= 0 then
+		jumpPower = starterPlayer.CharacterJumpPower
+		if typeof(jumpPower) ~= "number" or jumpPower <= 0 then
+			jumpPower = 50
 		end
 	end
+
+	local jumpHeight = saved and saved.jumpHeight or nil
+	if typeof(jumpHeight) ~= "number" or jumpHeight <= 0 then
+		jumpHeight = starterPlayer.CharacterJumpHeight
+		if typeof(jumpHeight) ~= "number" or jumpHeight <= 0 then
+			jumpHeight = 7.2
+		end
+	end
+
+	humanoid.WalkSpeed = walkSpeed
+	humanoid.JumpPower = jumpPower
+	humanoid.JumpHeight = jumpHeight
+end
+
+local function releaseContestants(contestants)
+	for _, player in ipairs(contestants) do
+		releaseContestant(player)
+	end
+end
+
+--[[
+	Holds everyone still for exactly as long as the roll call UI is on screen,
+	then hands control back. Freeze is re-applied while waiting so a mid-window
+	respawn can't give someone early movement.
+]]
+local function holdUntilRollCallEnds(contestants)
+	local deadline = os.clock() + ROLL_CALL_DISPLAY_SECONDS
+	while os.clock() < deadline do
+		for _, player in ipairs(contestants) do
+			if player.Parent and player:GetAttribute("MatchLocked") == true then
+				applyFreeze(player)
+			end
+		end
+		task.wait(0.25)
+	end
+
+	releaseContestants(contestants)
+end
+
+-- Teleport helper function
+local function teleportPlayers(playersList, targetPart)
+	local toLobby = targetPart == lobbySpawn
+	for _, player in ipairs(playersList) do
+		local character = player.Character
+		if character and character:FindFirstChild("HumanoidRootPart") then
+			-- Returning a whole field to one point stacks everyone inside each
+			-- other; scatter them across the lobby instead.
+			if toLobby and LobbySpawnService.placeCharacter(character) then
+				continue
+			end
+			character.HumanoidRootPart.CFrame = targetPart.CFrame * CFrame.new(0, 3, 0)
+		end
+	end
+end
+
+--[[
+	Safety net for the walk home at the end of a round.
+
+	teleportPlayers only moves players who are InArena, not eliminated, and who
+	happen to have a character with a root part at that exact instant. Anyone
+	mid-respawn was silently skipped, and an eliminated player whose own return
+	was swallowed by EliminationService's re-entrancy guard was never in the list
+	to begin with - either way they were left standing in the arena until the
+	next round moved them.
+
+	So instead of trusting the sweep, check where everyone actually ended up and
+	move whoever is still out there.
+]]
+local ARENA_EXIT_PADDING = 14 -- studs past the tile footprint that still counts as "in the arena"
+local ARENA_EXIT_ATTEMPTS = 3
+local pendingLobbyPlacement = {} -- [player] = RBXScriptConnection
+
+local function getArenaBounds()
+	local tiles = getGridTiles(arenaGrid)
+	if #tiles == 0 then
+		return nil
+	end
+	local minX, maxX = math.huge, -math.huge
+	local minZ, maxZ = math.huge, -math.huge
+	local topY = -math.huge
+	for _, tile in ipairs(tiles) do
+		-- Fallen tiles have been tweened 40 studs down; their home position is what
+		-- defines the footprint, so use the widest reading either way.
+		minX = math.min(minX, tile.Position.X)
+		maxX = math.max(maxX, tile.Position.X)
+		minZ = math.min(minZ, tile.Position.Z)
+		maxZ = math.max(maxZ, tile.Position.Z)
+		topY = math.max(topY, tile.Position.Y)
+	end
+	return {
+		minX = minX - ARENA_EXIT_PADDING,
+		maxX = maxX + ARENA_EXIT_PADDING,
+		minZ = minZ - ARENA_EXIT_PADDING,
+		maxZ = maxZ + ARENA_EXIT_PADDING,
+		minY = topY - 60,
+		maxY = topY + 60,
+	}
+end
+
+local function isInsideArena(position, bounds)
+	return position.X >= bounds.minX and position.X <= bounds.maxX
+		and position.Z >= bounds.minZ and position.Z <= bounds.maxZ
+		and position.Y >= bounds.minY and position.Y <= bounds.maxY
+end
+
+-- No character to move right now: place them the moment they get one.
+local function placeOnNextCharacter(player)
+	if pendingLobbyPlacement[player] then
+		return
+	end
+	local connection
+	connection = player.CharacterAdded:Connect(function(character)
+		connection:Disconnect()
+		pendingLobbyPlacement[player] = nil
+		character:WaitForChild("HumanoidRootPart", 10)
+		-- Only if they have not been sent into a new round in the meantime.
+		if player:GetAttribute("InArena") ~= true then
+			LobbySpawnService.placeCharacter(character)
+		end
+	end)
+	pendingLobbyPlacement[player] = connection
+	task.delay(20, function()
+		if pendingLobbyPlacement[player] == connection then
+			connection:Disconnect()
+			pendingLobbyPlacement[player] = nil
+		end
+	end)
+end
+
+local function ensureEveryoneLeftTheArena()
+	local bounds = getArenaBounds()
+	if not bounds then
+		return
+	end
+
+	for _ = 1, ARENA_EXIT_ATTEMPTS do
+		local stragglers = {}
+		for _, player in ipairs(Players:GetPlayers()) do
+			-- Practice happens on its own grid well away from the arena, so this
+			-- never drags a practising player out of their session.
+			if player:GetAttribute("InPractice") ~= true then
+				local character = player.Character
+				local root = character and character:FindFirstChild("HumanoidRootPart")
+				if root then
+					if isInsideArena(root.Position, bounds) then
+						table.insert(stragglers, player)
+					end
+				else
+					placeOnNextCharacter(player)
+				end
+			end
+		end
+
+		if #stragglers == 0 then
+			return
+		end
+
+		teleportPlayers(stragglers, lobbySpawn)
+		task.wait(0.35)
+	end
+
+	warn("[HazardSpawner] Some players could not be returned to the lobby after the round.")
 end
 
 local function spawnHazard()
@@ -705,30 +1068,29 @@ local function spawnHazard()
 	-- Instantly reset the tile color the moment it hits the ground!
 	resetTile(targetTile)
 
-	-- 4. THE INSTANT MATH KILL (Bypasses physics engine lag completely)
-	-- We draw an invisible math box exactly the size of the tile, extending 10 studs up
-	local killRegionSize = Vector3.new(targetTile.Size.X - 0.5, 10, targetTile.Size.Z - 0.5) 
-	local killRegionCFrame = targetTile.CFrame * CFrame.new(0, 5, 0)
+	-- 4. THE INSTANT KILL (bypasses physics engine lag completely)
+	-- Position-based and lag-compensated - see HazardHitService for why the old
+	-- bounding-box sweep was replaced.
+	local hitPlayers = HazardHitService.getPlayersHit(targetTile, function(player)
+		return player:GetAttribute("InArena") == true and player:GetAttribute("IsEliminated") ~= true
+	end)
 
-	local partsInZone = workspace:GetPartBoundsInBox(killRegionCFrame, killRegionSize)
-	for _, part in ipairs(partsInZone) do
-		local character = part.Parent
-		if character and character:FindFirstChild("Humanoid") then
-			local player = Players:GetPlayerFromCharacter(character)
-			-- Ensure they are an active player in the arena
-			if player and player:GetAttribute("InArena") == true and player:GetAttribute("IsEliminated") ~= true then
-				-- Juggernaut is immune to falling grid hazards (still dies to edge / kill floor)
-				if player:GetAttribute("IsJuggernaut") == true then
-					continue
-				end
-				EliminationService.eliminate(player, { cause = "hazard", respectShield = true })
-			end
-		end
+	for _, player in ipairs(hitPlayers) do
+		-- Juggernaut immunity is enforced inside EliminationService.
+		EliminationService.eliminate(player, { cause = "hazard", respectShield = true })
 	end
 
 	-- 5. Spawn the invisible server hitbox just in case your other scripts need the "CanKill" attribute
 	local serverHitbox = hazardCubeModel:Clone()
 	serverHitbox:SetAttribute("CanKill", true)
+
+	-- Strip the touch-based elimination script. It is a second kill path with
+	-- the old unfair semantics and would undo the check above.
+	for _, descendant in ipairs(serverHitbox:GetDescendants()) do
+		if descendant:IsA("BaseScript") and descendant.Name == "EliminationScript" then
+			descendant:Destroy()
+		end
+	end
 
 	for _, part in ipairs(serverHitbox:GetDescendants()) do
 		if part:IsA("BasePart") then
@@ -754,17 +1116,16 @@ end
 
 -- === THE MAIN GAME LOOP STATE MACHINE ===
 while true do
-	-- STATE 1: INTERMISSION + MODE VOTE
+	-- STATE 1: INTERMISSION
+	-- The mode poll is already running - it opens when the previous match starts
+	-- so the lobby has the whole round to decide. It only closes here.
 	clearAliveHud()
-	local intermissionDuration = 15
-	local voteDuration = 12
-	local chosenMode = "Classic"
-	local voteFinished = false
+	local intermissionDuration = 10
 
-	task.spawn(function()
-		chosenMode = VoteService.runVote(voteDuration) or "Classic"
-		voteFinished = true
-	end)
+	if not VoteService.isActive() then
+		-- First round of the server, or the poll was lost somehow.
+		VoteService.open()
+	end
 
 	for i = intermissionDuration, 1, -1 do
 		survivalTimeValue.Value = i
@@ -774,13 +1135,7 @@ while true do
 		end
 	end
 
-	local waitDeadline = os.clock() + 3
-	while not voteFinished and os.clock() < waitDeadline do
-		task.wait(0.1)
-	end
-	if not voteFinished then
-		chosenMode = "Classic"
-	end
+	local chosenMode = VoteService.close() or "Classic"
 
 	local activeContestants = {}
 	for _, player in ipairs(Players:GetPlayers()) do
@@ -800,6 +1155,9 @@ while true do
 	end
 
 	-- STATE 2: PREPARE ROUND
+	-- Last round's giant winner steps off the lobby floor.
+	WinnerDisplayService.clear()
+
 	RoundData.clear()
 	RoundData.clearTeams()
 	RoundData.setMode(chosenMode)
@@ -817,6 +1175,22 @@ while true do
 		player:SetAttribute("InArena", true)
 		player:SetAttribute("InPractice", nil)
 		RoundData.markContestant(player)
+		-- Counts toward the "matches played" achievement ladder.
+		pcall(function()
+			local PlayerStatsService = require(ServerScriptService:WaitForChild("PlayerStatsService"))
+			PlayerStatsService.addMatch(player)
+		end)
+	end
+
+	-- Freeze before the teleport so nobody gets a free frame of movement on landing.
+	lockContestants(activeContestants)
+
+	-- Pick the juggernaut before placing anyone: they start in the middle with
+	-- the hunters ringed around them.
+	local juggernaut = nil
+	if chosenMode == "Juggernaut" then
+		juggernaut = activeContestants[math.random(1, #activeContestants)]
+		RoundData.setJuggernaut(juggernaut)
 	end
 
 	local tilesForSpawn = getGridTiles(arenaGrid)
@@ -824,12 +1198,7 @@ while true do
 		assignTeams(activeContestants)
 		teleportTeamsOppositeSides(activeContestants, tilesForSpawn, arenaSpawn)
 	else
-		teleportPlayers(activeContestants, arenaSpawn)
-	end
-
-	if chosenMode == "Juggernaut" then
-		local pick = activeContestants[math.random(1, #activeContestants)]
-		RoundData.setJuggernaut(pick)
+		teleportPlayersInRing(activeContestants, tilesForSpawn, arenaSpawn, juggernaut)
 	end
 
 	local rollCallData = {}
@@ -870,13 +1239,17 @@ while true do
 	local overtimeEndDelay = 0.005
 	local playersAtStart = #activeContestants
 
-	task.wait(3.2)
+	holdUntilRollCallEnds(activeContestants)
 
 	if chosenMode == "Shrinking" then
 		ShrinkService.start(cachedArenaTiles)
 	end
 
 	updateAliveHud()
+
+	-- Voting for the NEXT round opens the moment this one starts, giving anyone
+	-- in the lobby the whole match to make up their mind.
+	VoteService.open()
 
 	-- STATE 3: IN-GAME
 	while timePassed < MAX_MATCH_TIME do
@@ -975,6 +1348,7 @@ while true do
 	local winningTeam = nil
 	local winner = nil
 	local juggernautWon = false
+	local matchDraw = false
 
 	if isTeamMode then
 		winningTeam = resolveWinningTeam(matchTime)
@@ -1035,11 +1409,11 @@ while true do
 			end)
 		end
 	else
-		winner = resolveWinner(matchTime, playersAtStart)
+		winner, matchDraw = resolveWinner(matchTime, playersAtStart)
 		RoundData.winner = winner
 		RoundData.winningTeam = nil
 
-		if winner and winner.Parent then
+		if winner and winner.Parent and not matchDraw then
 			pcall(function()
 				local PlayerStatsService = require(ServerScriptService:WaitForChild("PlayerStatsService"))
 				PlayerStatsService.addWin(winner)
@@ -1068,7 +1442,15 @@ while true do
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player:GetAttribute("InArena") == true then
-			table.insert(playersToReturnToLobby, player)
+			--[[
+				Only move players who are still out in the arena. Eliminated players
+				were already returned to the lobby when they died, and sending them
+				again here teleported them a second time - you would land, stand
+				still, then get yanked somewhere else when the round wrapped up.
+			]]
+			if player:GetAttribute("IsEliminated") ~= true then
+				table.insert(playersToReturnToLobby, player)
+			end
 
 			if RoundData.didPlay(player) then
 				local personalTime = eliminationTimes[player] or matchTime
@@ -1082,10 +1464,15 @@ while true do
 	end
 
 	teleportPlayers(playersToReturnToLobby, lobbySpawn)
+	ensureEveryoneLeftTheArena()
 
 	clearAliveHud()
 
 	for _, player in ipairs(Players:GetPlayers()) do
+		-- Safety net: nobody leaves a round still frozen.
+		if player:GetAttribute("MatchLocked") == true or frozenMovement[player] then
+			releaseContestant(player)
+		end
 		player:SetAttribute("InArena", nil)
 		player:SetAttribute("HasShield", nil)
 		player:SetAttribute("InPractice", nil)
@@ -1139,12 +1526,32 @@ while true do
 			payload.winnerName = winner.DisplayName
 			payload.winnerUserId = winner.UserId
 			payload.winnerIsJuggernaut = true
+		elseif matchDraw then
+			-- No avatar to show: everyone left went out together.
+			payload.winnerIsTeam = true
+			payload.isDraw = true
+			payload.winningTeam = nil
+			payload.winnerName = "DRAW"
+			payload.winnerUserId = 0
 		else
 			payload.winnerIsTeam = false
 			payload.winnerName = winner and winner.DisplayName or "Unknown"
 			payload.winnerUserId = winner and winner.UserId or 0
 		end
 		matchResultsEvent:FireClient(player, payload)
+	end
+
+	-- Put the winner up in the lobby, giant, so it is obvious who took it.
+	if winner and not matchDraw then
+		WinnerDisplayService.show(winner)
+	elseif isJuggernautMode and juggernautWon and winner then
+		WinnerDisplayService.show(winner)
+	end
+
+	-- Stats only change here, so this is the moment the boards are stale.
+	local leaderboardRefresh = ServerStorage:FindFirstChild("LeaderboardRefresh")
+	if leaderboardRefresh then
+		leaderboardRefresh:Fire()
 	end
 
 	task.wait(2) 

@@ -12,10 +12,9 @@ local animationsFolder = ReplicatedStorage:WaitForChild("GameAssets"):WaitForChi
 local gameAssets = ReplicatedStorage:WaitForChild("GameAssets")
 
 local ANIM_SETTINGS = {
-	-- Long clip with ~1.5s windup: skip ahead, then play the punch fast
+	-- Short 0.7s punch clip with no windup: play it straight through.
 	GridPunch = {
-		playbackSpeed = 5,
-		startTime = 1.5,
+		playbackSpeed = 1,
 	},
 	DashStrike = {
 		playbackSpeed = 1,
@@ -30,6 +29,18 @@ local ANIM_SETTINGS = {
 }
 
 local WARM_ANIM_NAMES = { "GridPunch", "DashStrike", "ShieldBubble", "Shockwave" }
+
+-- The hazard death clip is played by the server at Action4 and must survive the
+-- ability-track cleanup below, which runs the moment IsEliminated flips true.
+local DEATH_ANIM_NAME = "HazardDeath"
+
+local function getDeathAnimId()
+	local obj = animationsFolder:FindFirstChild(DEATH_ANIM_NAME)
+	if obj and obj:IsA("Animation") then
+		return obj.AnimationId
+	end
+	return nil
+end
 
 local trackCache = {}
 
@@ -258,10 +269,50 @@ local function playCombatAnim(userId, animName)
 	end
 end
 
+--[[
+	Predictive playback.
+
+	CombatController fires LocalCombatAnim the instant the button is pressed, so
+	our own swing starts immediately rather than a round trip later. The server
+	still broadcasts to everyone; we record what we played so the echo for our
+	own character is ignored and does not restart the clip mid-swing.
+]]
+local ABILITY_TO_ANIM = {
+	["Grid Punch"] = "GridPunch",
+	["Dash Strike"] = "DashStrike",
+	["Shield Bubble"] = "ShieldBubble",
+	["Shockwave"] = "Shockwave",
+}
+
+local ECHO_WINDOW = 0.6
+local predictedAt = {}
+
+local localCombatAnim = ReplicatedStorage:FindFirstChild("LocalCombatAnim")
+if localCombatAnim then
+	localCombatAnim.Event:Connect(function(abilityName)
+		local animName = ABILITY_TO_ANIM[abilityName]
+		if not animName then
+			return
+		end
+		predictedAt[animName] = os.clock()
+		playCombatAnim(localPlayer.UserId, animName)
+	end)
+end
+
 combatAnimEvent.OnClientEvent:Connect(function(animName, userId)
 	if typeof(animName) ~= "string" or typeof(userId) ~= "number" then
 		return
 	end
+
+	-- Our own swing has already been played locally; skip the echo.
+	if userId == localPlayer.UserId then
+		local at = predictedAt[animName]
+		if at and os.clock() - at < ECHO_WINDOW then
+			predictedAt[animName] = nil
+			return
+		end
+	end
+
 	playCombatAnim(userId, animName)
 end)
 
@@ -274,12 +325,17 @@ local function clearLocomotionMute(character)
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
 	if animator then
+		local deathId = getDeathAnimId()
 		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-			if track.Priority == Enum.AnimationPriority.Action
+			local isDeathClip = deathId ~= nil
+				and track.Animation ~= nil
+				and track.Animation.AnimationId == deathId
+			if not isDeathClip and (
+				track.Priority == Enum.AnimationPriority.Action
 				or track.Priority == Enum.AnimationPriority.Action2
 				or track.Priority == Enum.AnimationPriority.Action3
 				or track.Priority == Enum.AnimationPriority.Action4
-			then
+			) then
 				track:Stop(0.1)
 			end
 		end

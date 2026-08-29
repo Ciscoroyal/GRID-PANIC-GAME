@@ -17,10 +17,30 @@ local function getPlayerLevel(player)
 	return 1
 end
 
+--[[
+	During a live match the overhead tag is trimmed to the player's name only.
+	Once they are eliminated (and back in the lobby) or the round ends, the full
+	tag with level, fans and win streak comes back.
+]]
+local function isInMatch(player)
+	if player:GetAttribute("InArena") ~= true then
+		return false
+	end
+	return player:GetAttribute("IsEliminated") ~= true
+end
+
+-- The billboard is sized for the full stat stack, so with only the name left
+-- the label floats well above the head. Drop the whole tag closer in that mode.
+local FULL_TAG_OFFSET = overheadTagTemplate.StudsOffset
+local NAME_ONLY_OFFSET = Vector3.new(FULL_TAG_OFFSET.X, 0.2, FULL_TAG_OFFSET.Z)
+
 local function updateOverheadTag(player, tag)
 	if not tag or not tag.Parent then return end
 	local frame = tag:FindFirstChild("Frame")
 	if not frame then return end
+
+	local nameOnly = isInMatch(player)
+	tag.StudsOffset = nameOnly and NAME_ONLY_OFFSET or FULL_TAG_OFFSET
 
 	local nameLabel = frame:FindFirstChild("PlayerName")
 	local levelLabel = frame:FindFirstChild("Level")
@@ -34,15 +54,19 @@ local function updateOverheadTag(player, tag)
 	end
 	if levelLabel then
 		levelLabel.Text = "Lv." .. getPlayerLevel(player)
+		levelLabel.Visible = not nameOnly
 	end
 	if fansLabel then
 		fansLabel.Text = tostring(fanCount)
+	end
+	if fansFrame then
+		fansFrame.Visible = not nameOnly
 	end
 
 	local streakFrame = frame:FindFirstChild("Streak")
 	local streakValue = tonumber(player:GetAttribute("WinStreak")) or 0
 	if streakFrame then
-		streakFrame.Visible = streakValue > 0
+		streakFrame.Visible = (not nameOnly) and streakValue > 0
 		local streakLabel = streakFrame:FindFirstChild("Fans")
 		if streakLabel then
 			streakLabel.Text = tostring(streakValue)
@@ -190,6 +214,14 @@ Players.PlayerAdded:Connect(function(player)
 	end)
 
 	player:GetAttributeChangedSignal("WinStreak"):Connect(function()
+		refreshPlayerOverheadTag(player)
+	end)
+
+	-- Entering / leaving a match switches the tag between name-only and full.
+	player:GetAttributeChangedSignal("InArena"):Connect(function()
+		refreshPlayerOverheadTag(player)
+	end)
+	player:GetAttributeChangedSignal("IsEliminated"):Connect(function()
 		refreshPlayerOverheadTag(player)
 	end)
 

@@ -3,9 +3,18 @@ local SoundService = game:GetService("SoundService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local PlayerSettings = require(ReplicatedStorage:WaitForChild("PlayerSettings"))
+local Audio = require(ReplicatedStorage:WaitForChild("Audio"))
 
 local localPlayer = Players.LocalPlayer
 PlayerSettings.ensure(localPlayer)
+
+--[[
+	This script owns audio settings for the client. Music is handled below;
+	effects are muted in one place by dropping the SFX SoundGroup to zero, so a
+	new sound added anywhere obeys the toggle without its own check.
+]]
+Audio.applySettingToGroup()
+PlayerSettings.onChanged("SFX", Audio.applySettingToGroup)
 
 local lobbyTemplate = SoundService:WaitForChild("LobbyMusic")
 local matchTemplate = SoundService:WaitForChild("MatchMusic")

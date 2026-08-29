@@ -6,6 +6,7 @@ local afkEvent = ReplicatedStorage:WaitForChild("AFKEvent")
 local practiceEvent = ReplicatedStorage:WaitForChild("PracticeEvent")
 
 local afkTagTemplate = ServerStorage:WaitForChild("AFKTag")
+local LobbySpawnService = require(game:GetService("ServerScriptService"):WaitForChild("LobbySpawnService"))
 
 local STAND_DURATION = 2
 local platformCheckInterval = 0.1
@@ -40,7 +41,9 @@ local function updateAfkTag(player)
 		existing:Destroy()
 	end
 
-	if player:GetAttribute("IsAFK") == true then
+	-- The tag belongs to the lobby only. Even if a flag somehow survives into a
+	-- round, it must never render over a contestant.
+	if player:GetAttribute("IsAFK") == true and player:GetAttribute("InArena") ~= true then
 		local tag = afkTagTemplate:Clone()
 		tag.Name = "AFKTag"
 		tag.Adornee = root
@@ -52,8 +55,35 @@ local function updateAfkTag(player)
 	end
 end
 
+--[[
+	AFK is decided when the round locks contestants in. Pressing it after that
+	point used to flag the player mid-match, which both failed to keep them out
+	and dragged the lobby AFK tag into the arena. A late press is now queued and
+	applied the moment the round releases them.
+]]
+local function applyPendingAfk(player)
+	if player:GetAttribute("PendingAFK") ~= true then
+		return
+	end
+	if player:GetAttribute("InArena") == true then
+		return
+	end
+	player:SetAttribute("PendingAFK", nil)
+	player:SetAttribute("IsAFK", true)
+	updateAfkTag(player)
+end
+
 afkEvent.OnServerEvent:Connect(function(player, isAFK)
-	player:SetAttribute("IsAFK", isAFK == true)
+	local wantsAFK = isAFK == true
+
+	if wantsAFK and player:GetAttribute("InArena") == true then
+		-- Too late for this round: remember it, show nothing yet.
+		player:SetAttribute("PendingAFK", true)
+		return
+	end
+
+	player:SetAttribute("PendingAFK", nil)
+	player:SetAttribute("IsAFK", wantsAFK)
 	updateAfkTag(player)
 end)
 
@@ -78,12 +108,15 @@ local function teleportToPractice(player)
 end
 
 local function teleportToLobby(player)
-	local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
 	if not root then return false end
 	local lobbySpawn = Workspace:FindFirstChild("LobbySpawn")
 	if not lobbySpawn then return false end
 	player:SetAttribute("InPractice", nil)
-	root.CFrame = lobbySpawn.CFrame * CFrame.new(0, 3, 0)
+	if not LobbySpawnService.placeCharacter(character) then
+		root.CFrame = lobbySpawn.CFrame * CFrame.new(0, 3, 0)
+	end
 	return true
 end
 
@@ -131,6 +164,11 @@ Players.PlayerAdded:Connect(function(player)
 	player:GetAttributeChangedSignal("IsAFK"):Connect(function()
 		updateAfkTag(player)
 	end)
+
+	player:GetAttributeChangedSignal("InArena"):Connect(function()
+		applyPendingAfk(player)
+		updateAfkTag(player)
+	end)
 end)
 
 for _, player in ipairs(Players:GetPlayers()) do
@@ -141,6 +179,11 @@ for _, player in ipairs(Players:GetPlayers()) do
 	end)
 
 	player:GetAttributeChangedSignal("IsAFK"):Connect(function()
+		updateAfkTag(player)
+	end)
+
+	player:GetAttributeChangedSignal("InArena"):Connect(function()
+		applyPendingAfk(player)
 		updateAfkTag(player)
 	end)
 

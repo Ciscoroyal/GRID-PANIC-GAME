@@ -12,6 +12,10 @@ local claimAchievementEvent = ReplicatedStorage:WaitForChild("ClaimAchievementEv
 local AchievementService = {}
 local cache = {}
 
+--[[
+	Every Stat named in AchievementDefinitions has to resolve here. The values
+	all already existed in the game; only `matches` needed new tracking.
+]]
 local function readStat(player, statKey)
 	if statKey == "wins" then
 		local wins = player:FindFirstChild("TotalWins")
@@ -22,6 +26,21 @@ local function readStat(player, statKey)
 	elseif statKey == "fans" then
 		local fans = player:FindFirstChild("AllTimeFans")
 		return fans and fans.Value or 0
+	elseif statKey == "streak" then
+		-- Best streak reached, not the current one: an achievement should not
+		-- un-earn itself the moment you lose.
+		local best = player:GetAttribute("BestWinStreak") or 0
+		local current = player:FindFirstChild("WinStreak")
+		return math.max(best, current and current.Value or 0)
+	elseif statKey == "level" then
+		return player:GetAttribute("PlayerLevel") or 1
+	elseif statKey == "matches" then
+		local matches = player:FindFirstChild("TotalMatches")
+		return matches and matches.Value or (player:GetAttribute("StatMatches") or 0)
+	elseif statKey == "coins" then
+		local leaderstats = player:FindFirstChild("leaderstats")
+		local coins = leaderstats and leaderstats:FindFirstChild("Coins")
+		return coins and coins.Value or 0
 	end
 	return 0
 end

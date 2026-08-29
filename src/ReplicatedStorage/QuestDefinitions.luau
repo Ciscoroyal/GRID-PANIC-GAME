@@ -3,7 +3,124 @@
 	Everyone gets the same DAILY_COUNT quests each UTC day.
 ]]
 
-local QuestDefinitions = {
+--[[
+	The pool is generated from per-type tiers. A bigger pool is the whole point:
+	with only fifteen entries and three picked a day, the same handful came round
+	constantly.
+
+	Every Type here must have a matching QuestService.on... hook, or the quest
+	will sit at zero forever.
+]]
+local QuestDefinitions = {}
+
+local FAMILIES = {
+	{
+		type = "Survive",
+		tiers = {
+			{ 30, "Survive 30 Seconds", "Stay alive for 30 seconds in one match.", 35 },
+			{ 45, "Survive 45 Seconds", "Stay alive for 45 seconds in one match.", 50 },
+			{ 60, "Survive 60 Seconds", "Stay alive for 60 seconds in one match.", 75 },
+			{ 75, "Survive 75 Seconds", "Stay alive for 75 seconds in one match.", 90 },
+			{ 90, "Survive 90 Seconds", "Stay alive for 90 seconds in one match.", 110 },
+			{ 105, "Last Stand", "Stay alive for 105 seconds in one match.", 140 },
+		},
+	},
+	{
+		type = "Play",
+		tiers = {
+			{ 2, "Play 2 Matches", "Finish 2 matches as a contestant.", 40 },
+			{ 3, "Play 3 Matches", "Finish 3 matches as a contestant.", 60 },
+			{ 5, "Play 5 Matches", "Finish 5 matches as a contestant.", 90 },
+			{ 8, "Marathon", "Finish 8 matches as a contestant.", 140 },
+		},
+	},
+	{
+		type = "Win",
+		tiers = {
+			{ 1, "Win a Match", "Win a round.", 120 },
+			{ 2, "Win 2 Matches", "Win 2 rounds.", 180 },
+			{ 3, "Triple Threat", "Win 3 rounds.", 260 },
+		},
+	},
+	{
+		type = "Eliminate",
+		tiers = {
+			{ 1, "Get an Elimination", "Knock one player out.", 100 },
+			{ 2, "Double Trouble", "Knock 2 players out.", 150 },
+			{ 3, "Hat Trick", "Knock 3 players out.", 210 },
+			{ 5, "Cleanup Crew", "Knock 5 players out.", 300 },
+		},
+	},
+	{
+		type = "Ability",
+		tiers = {
+			{ 1, "Use Your Ability", "Activate your equipped ability.", 50 },
+			{ 3, "Ability Combo", "Use your ability 3 times.", 75 },
+			{ 5, "Ability Spammer", "Use your ability 5 times.", 100 },
+			{ 8, "Button Masher", "Use your ability 8 times.", 140 },
+			{ 12, "Never Off Cooldown", "Use your ability 12 times.", 190 },
+		},
+	},
+	{
+		type = "Sponsor",
+		tiers = {
+			{ 1, "Cheer Once", "Cheer for any player in a match.", 40 },
+			{ 2, "Loud Crowd", "Cheer for 2 players.", 70 },
+			{ 3, "Superfan", "Cheer for 3 players.", 100 },
+		},
+	},
+	{
+		type = "SponsorWin",
+		tiers = {
+			{ 1, "Back a Winner", "Cheer a player who goes on to win.", 100 },
+			{ 2, "Kingmaker", "Cheer 2 players who go on to win.", 190 },
+		},
+	},
+	{
+		type = "Dash",
+		tiers = {
+			{ 10, "Dash 10 Times", "Dash 10 times during matches.", 60 },
+			{ 20, "Quick Feet", "Dash 20 times during matches.", 100 },
+			{ 35, "Blur", "Dash 35 times during matches.", 150 },
+		},
+	},
+	{
+		type = "Punch",
+		tiers = {
+			{ 1, "Land a Punch", "Land one Grid Punch on a player.", 60 },
+			{ 3, "Bare Knuckle", "Land 3 Grid Punches.", 110 },
+			{ 6, "Heavy Hands", "Land 6 Grid Punches.", 170 },
+		},
+	},
+	{
+		type = "Mine",
+		tiers = {
+			{ 1, "Lay a Trap", "Place one Proximity Mine.", 55 },
+			{ 3, "Minefield", "Place 3 Proximity Mines.", 100 },
+			{ 5, "Demolition", "Place 5 Proximity Mines.", 155 },
+		},
+	},
+}
+
+QuestDefinitions.POOL = {}
+
+for _, family in ipairs(FAMILIES) do
+	for _, tier in ipairs(family.tiers) do
+		local goal, title, description, reward = tier[1], tier[2], tier[3], tier[4]
+		local id = family.type .. goal
+		QuestDefinitions[id] = {
+			Id = id,
+			Title = title,
+			Description = description,
+			Goal = goal,
+			RewardCoins = reward,
+			Type = family.type,
+		}
+		table.insert(QuestDefinitions.POOL, id)
+	end
+end
+
+local UNUSED_ORIGINAL = {
 	Survive45 = {
 		Id = "Survive45",
 		Title = "Survive 45 Seconds",
@@ -118,40 +235,50 @@ local QuestDefinitions = {
 	},
 	Dash10 = {
 		Id = "Dash10",
-		Title = "Dash 10 Times",
-		Description = "Dash 10 times during matches.",
-		Goal = 10,
-		RewardCoins = 60,
-		Type = "Dash",
 	},
-}
-
--- Full rotation pool (same for all players each day)
-QuestDefinitions.POOL = {
-	"Survive45",
-	"Survive60",
-	"Survive90",
-	"SponsorWinner",
-	"Sponsor1",
-	"UseAbility",
-	"UseAbility3",
-	"UseAbility5",
-	"Play3",
-	"Play5",
-	"Win1",
-	"Win2",
-	"Eliminate1",
-	"Eliminate2",
-	"Dash10",
 }
 
 QuestDefinitions.DAILY_COUNT = 3
 
 -- Legacy alias used by older UI; prefer pickForDay / payload.order
-QuestDefinitions.ORDER = { "Survive60", "SponsorWinner", "UseAbility" }
+QuestDefinitions.ORDER = { "Survive60", "SponsorWin1", "Ability1" }
+
+--[[
+	Quest ids changed shape when the pool was rebuilt (UseAbility5 -> Ability5,
+	SponsorWinner -> SponsorWin1, and so on). A player who already had a day's
+	quests saved is holding the old ids, so map them forward rather than letting
+	them resolve to nothing and disappear from the list.
+
+	Only the four that actually changed need an entry; the rest kept their names.
+]]
+QuestDefinitions.LEGACY_ALIASES = {
+	SponsorWinner = "SponsorWin1",
+	UseAbility = "Ability1",
+	UseAbility3 = "Ability3",
+	UseAbility5 = "Ability5",
+}
+
+-- Returns the current id for a possibly-old quest id, or nil if it is gone.
+function QuestDefinitions.resolveId(questId)
+	if type(questId) ~= "string" then
+		return nil
+	end
+	if QuestDefinitions[questId] and type(QuestDefinitions[questId]) == "table" then
+		return questId
+	end
+	local aliased = QuestDefinitions.LEGACY_ALIASES[questId]
+	if aliased and QuestDefinitions[aliased] then
+		return aliased
+	end
+	return nil
+end
 
 function QuestDefinitions.get(questId)
-	return QuestDefinitions[questId]
+	local def = QuestDefinitions[questId]
+	if type(def) == "table" and def.Goal then
+		return def
+	end
+	return nil
 end
 
 local function hashString(s)

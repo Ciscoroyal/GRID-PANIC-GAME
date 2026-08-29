@@ -47,7 +47,14 @@ local function ensureValues(player)
 		streak.Name = "WinStreak"
 		streak.Parent = player
 	end
-	return wins, kills, streak
+	-- Matches played: the long-haul grind stat the achievement ladder needs.
+	local matches = player:FindFirstChild("TotalMatches")
+	if not matches then
+		matches = Instance.new("IntValue")
+		matches.Name = "TotalMatches"
+		matches.Parent = player
+	end
+	return wins, kills, streak, matches
 end
 
 local function pushOrdered(store, userId, value)
@@ -96,23 +103,29 @@ local function scheduleBoardFlush(player, delaySeconds)
 end
 
 function PlayerStatsService.load(player)
-	local wins, kills, streak = ensureValues(player)
+	local wins, kills, streak, matches = ensureValues(player)
 	local success, data = pcall(function()
 		return statsStore:GetAsync(player.UserId)
 	end)
+	local bestStreak = 0
 	if success and type(data) == "table" then
 		wins.Value = tonumber(data.wins) or 0
 		kills.Value = tonumber(data.kills) or 0
 		streak.Value = tonumber(data.winStreak) or 0
+		matches.Value = tonumber(data.matches) or 0
+		bestStreak = tonumber(data.bestWinStreak) or streak.Value
 	else
 		wins.Value = 0
 		kills.Value = 0
 		streak.Value = 0
+		matches.Value = 0
 	end
 	loaded[player] = true
 	player:SetAttribute("StatWins", wins.Value)
 	player:SetAttribute("StatKills", kills.Value)
 	player:SetAttribute("WinStreak", streak.Value)
+	player:SetAttribute("StatMatches", matches.Value)
+	player:SetAttribute("BestWinStreak", math.max(bestStreak, streak.Value))
 
 	-- One ordered write on join keeps boards healthy without per-kill spam.
 	flushOrderedBoards(player)
@@ -132,15 +145,24 @@ function PlayerStatsService.save(player)
 	if not loaded[player] then
 		return
 	end
-	local wins, kills, streak = ensureValues(player)
+	local wins, kills, streak, matches = ensureValues(player)
 	pcall(function()
 		statsStore:SetAsync(player.UserId, {
 			wins = wins.Value,
 			kills = kills.Value,
 			winStreak = streak.Value,
+			matches = matches.Value,
+			bestWinStreak = player:GetAttribute("BestWinStreak") or streak.Value,
 		})
 	end)
 	flushOrderedBoards(player)
+end
+
+-- Counted once per match entered, for the "matches played" ladder.
+function PlayerStatsService.addMatch(player)
+	local _, _, _, matches = ensureValues(player)
+	matches.Value += 1
+	player:SetAttribute("StatMatches", matches.Value)
 end
 
 function PlayerStatsService.addWin(player)
@@ -149,6 +171,10 @@ function PlayerStatsService.addWin(player)
 	streak.Value += 1
 	player:SetAttribute("StatWins", wins.Value)
 	player:SetAttribute("WinStreak", streak.Value)
+	-- Highest streak ever reached, so a streak trophy is never taken back.
+	if streak.Value > (player:GetAttribute("BestWinStreak") or 0) then
+		player:SetAttribute("BestWinStreak", streak.Value)
+	end
 	-- Wins are rare; flush immediately so podiums update promptly.
 	PlayerStatsService.save(player)
 	pcall(function()

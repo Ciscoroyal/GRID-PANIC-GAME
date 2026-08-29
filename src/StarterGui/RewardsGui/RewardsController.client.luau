@@ -1,9 +1,11 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 local AchievementDefinitions = require(ReplicatedStorage:WaitForChild("AchievementDefinitions"))
 local LevelData = require(ReplicatedStorage:WaitForChild("LevelData"))
 local UIHelpers = require(ReplicatedStorage:WaitForChild("UIHelpers"))
+local Audio = require(ReplicatedStorage:WaitForChild("Audio"))
 
 local localPlayer = Players.LocalPlayer
 local rewardsGui = script.Parent
@@ -85,7 +87,19 @@ end
 local levelFrame = tabFrames.Level
 local xpContainer = levelFrame:WaitForChild("XPContainer")
 local levelBadge = xpContainer:WaitForChild("LevelBadge")
-local levelNumberLabel = levelBadge:WaitForChild("LevelNumber")
+
+--[[
+	The badge number is drawn twice - black behind, white in front - so both
+	layers have to be written or the shadow keeps the old digits.
+]]
+local function setBadgeText(badge, text)
+	local face = badge:FindFirstChild("Face")
+	local label = (face or badge):FindFirstChild("LevelNumber")
+	while label and label:IsA("TextLabel") do
+		label.Text = text
+		label = label:FindFirstChild("Title")
+	end
+end
 local barWrapper = xpContainer:WaitForChild("BarWrapper")
 local xpTextLabel = barWrapper:WaitForChild("XPText")
 local barFill = barWrapper:WaitForChild("BarBackground"):WaitForChild("BarFill")
@@ -160,22 +174,119 @@ local function updatePersonalStats()
 	statsLabel.Text = string.format("Level: %d\nWins: %d\nKills: %d\nFans: %d", level, wins, kills, fans)
 end
 
-local function updateLevelHeader(snapshot)
+local BAR_INFO = TweenInfo.new(0.55, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local POP_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+
+local shownLevel = nil
+local shownProgress = 0
+
+local function popBadge(target)
+	local scale = target:FindFirstChild("PopScale")
+	if not scale then
+		scale = Instance.new("UIScale")
+		scale.Name = "PopScale"
+		scale.Parent = target
+	end
+	scale.Scale = 1.35
+	TweenService:Create(scale, POP_INFO, { Scale = 1 }):Play()
+end
+
+--[[
+	The bar used to snap to its new width and the number used to flip instantly,
+	which made earning XP invisible. Now the fill sweeps to its new value, the
+	XP figure counts up alongside it, and a level-up runs the bar out to full,
+	resets it, and pops both badges rather than teleporting backwards.
+]]
+local function animateBar(fromProgress, toProgress)
+	barFill.Size = UDim2.new(math.clamp(fromProgress, 0, 1), 0, 1, 0)
+	TweenService:Create(barFill, BAR_INFO, {
+		Size = UDim2.new(math.clamp(toProgress, 0, 1), 0, 1, 0),
+	}):Play()
+end
+
+local function countXPText(snapshot, fromValue)
+	if snapshot.isMax then
+		xpTextLabel.Text = string.format("%s XP (MAX LEVEL)", formatXP(snapshot.totalXP))
+		return
+	end
+	local target = snapshot.xpIntoLevel or 0
+	local start = fromValue or target
+	local steps = 18
+	task.spawn(function()
+		for i = 1, steps do
+			local value = start + ((target - start) * (i / steps))
+			xpTextLabel.Text = string.format("%s / %s XP (Next Level)",
+				formatXP(value), formatXP(snapshot.xpForNext))
+			task.wait(0.03)
+		end
+		xpTextLabel.Text = string.format("%s / %s XP (Next Level)",
+			formatXP(target), formatXP(snapshot.xpForNext))
+	end)
+end
+
+local function updateLevelHeader(snapshot, animate)
 	if not snapshot then
 		return
 	end
+	local previous = latestLevelSnapshot
 	latestLevelSnapshot = snapshot
-	levelNumberLabel.Text = tostring(snapshot.level)
-	if snapshot.isMax then
-		xpTextLabel.Text = string.format("%s XP (MAX LEVEL)", formatXP(snapshot.totalXP))
-		barFill.Size = UDim2.new(1, 0, 1, 0)
+
+	setBadgeText(levelBadge, tostring(snapshot.level))
+	local nextBadge = xpContainer:FindFirstChild("NextBadge")
+	if nextBadge then
+		setBadgeText(nextBadge, snapshot.isMax and "MAX" or tostring((snapshot.level or 1) + 1))
+	end
+
+	local progress = snapshot.isMax and 1 or math.clamp(snapshot.progress or 0, 0, 1)
+
+	if not animate then
+		barFill.Size = UDim2.new(progress, 0, 1, 0)
+		countXPText(snapshot, snapshot.xpIntoLevel)
+		shownLevel, shownProgress = snapshot.level, progress
+		return
+	end
+
+	local levelledUp = shownLevel ~= nil and snapshot.level and snapshot.level > shownLevel
+	if levelledUp then
+		-- Run the old level out to full first, then start the new one from empty.
+		animateBar(shownProgress, 1)
+		popBadge(levelBadge)
+		if nextBadge then
+			popBadge(nextBadge)
+		end
+		task.delay(0.5, function()
+			animateBar(0, progress)
+		end)
 	else
-		xpTextLabel.Text = string.format(
-			"%s / %s XP (Next Level)",
-			formatXP(snapshot.xpIntoLevel),
-			formatXP(snapshot.xpForNext)
-		)
-		barFill.Size = UDim2.new(math.clamp(snapshot.progress or 0, 0, 1), 0, 1, 0)
+		animateBar(shownProgress, progress)
+	end
+
+	countXPText(snapshot, previous and previous.xpIntoLevel or snapshot.xpIntoLevel)
+	shownLevel, shownProgress = snapshot.level, progress
+end
+
+--[[
+	Milestone cards drop in behind the bar when the tab opens, so the page has
+	an order of arrival rather than appearing all at once.
+]]
+local function staggerMilestonesIn()
+	local index = 0
+	for _, row in ipairs(milestoneList:GetChildren()) do
+		if row:IsA("GuiObject") and row.Visible and row.Name ~= "LevelReward" then
+			index += 1
+			local scale = row:FindFirstChild("IntroScale")
+			if not scale then
+				scale = Instance.new("UIScale")
+				scale.Name = "IntroScale"
+				scale.Parent = row
+			end
+			scale.Scale = 0.85
+			task.delay(0.03 * index, function()
+				if scale.Parent then
+					TweenService:Create(scale, POP_INFO, { Scale = 1 }):Play()
+				end
+			end)
+		end
 	end
 end
 
@@ -214,12 +325,22 @@ local function updateMilestoneRow(row, milestone)
 		pcall(function()
 			claim.Interactable = false
 		end)
-		if milestone.unlocked then
-			setLabelTreeText(claim:FindFirstChild("Title"), "OWNED")
-			claim.BackgroundColor3 = STYLE.MUTED
-		else
-			setLabelTreeText(claim:FindFirstChild("Title"), "LOCKED")
-			claim.BackgroundColor3 = STYLE.ACCENT
+
+		--[[
+			These were the wrong way round: a locked milestone was painted the
+			green "good" colour and an earned one grey. Earned reads green, not
+			yet earned reads muted.
+
+			The visible surface is the inset Frame, not the button itself, so both
+			get written or the colour never changes.
+		]]
+		local earned = milestone.unlocked == true
+		local colour = earned and STYLE.ACCENT or STYLE.MUTED
+		setLabelTreeText(claim:FindFirstChild("Title"), earned and "OWNED" or "LOCKED")
+		claim.BackgroundColor3 = colour
+		local face = claim:FindFirstChild("Frame")
+		if face and face:IsA("GuiObject") then
+			face.BackgroundColor3 = colour
 		end
 	end
 end
@@ -464,11 +585,14 @@ local function setTab(tabName)
 		end
 	elseif tabName == "Level" then
 		if latestLevelSnapshot then
-			updateLevelHeader(latestLevelSnapshot)
+			-- Opening the tab shows the current state directly; only a real XP
+			-- change should sweep the bar.
+			updateLevelHeader(latestLevelSnapshot, false)
 		end
 		if latestMilestones then
 			renderMilestones(latestMilestones)
 		end
+		staggerMilestonesIn()
 		levelStateEvent:FireServer()
 	end
 end
@@ -518,7 +642,8 @@ achievementStateEvent.OnClientEvent:Connect(function(payload)
 end)
 
 levelStateEvent.OnClientEvent:Connect(function(snapshot, milestones)
-	updateLevelHeader(snapshot)
+	-- A pushed snapshot means XP actually moved, so animate it.
+	updateLevelHeader(snapshot, true)
 	if milestones then
 		renderMilestones(milestones)
 	end
@@ -529,6 +654,10 @@ levelUpEvent.OnClientEvent:Connect(function(payload)
 	if typeof(payload) ~= "table" then
 		return
 	end
+	-- Audible even with the Rewards panel closed, which is where a level-up
+	-- almost always happens.
+	Audio.play("LevelUp")
+
 	local msg = string.format("Level %d! +%d coins", payload.level or 0, payload.coins or 0)
 	if payload.cosmetic then
 		msg ..= " • Unlocked " .. payload.cosmetic

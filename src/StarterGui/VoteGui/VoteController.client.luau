@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local GameModeData = require(ReplicatedStorage:WaitForChild("GameModeData"))
 local UIHelpers = require(ReplicatedStorage:WaitForChild("UIHelpers"))
+local Audio = require(ReplicatedStorage:WaitForChild("Audio"))
 local voteStateEvent = ReplicatedStorage:WaitForChild("VoteStateEvent")
 local voteModeEvent = ReplicatedStorage:WaitForChild("VoteModeEvent")
 
@@ -40,11 +41,52 @@ local function setNestedText(label, text)
 	end
 end
 
+--[[
+	The vote panel hangs a fixed gap below the status line.
+
+	It used to sit at a hardcoded 0.018 of the screen, which only lined up on
+	desktop. TimerGui ignores the GUI inset and measures from the physical top
+	(IgnoreGuiInset = true, DeviceSafeInsets); VoteGui respects it
+	(CoreUISafeInsets). On desktop that inset is a thin topbar so the two looked
+	adjacent, but on a phone it is the topbar plus the notch safe area, which
+	pushed the vote panel far below the timer.
+
+	Measuring the label and subtracting the inset puts both into the same space,
+	so the gap is identical on every device.
+]]
+local GuiService = game:GetService("GuiService")
+local VOTE_GAP_SCALE = 0.034 -- matches the desktop spacing the game ships with
+local FALLBACK_Y = 0.018
+
+local statusLabel = nil
+local function getStatusLabel()
+	if statusLabel and statusLabel.Parent then
+		return statusLabel
+	end
+	local playerGui = localPlayer:FindFirstChild("PlayerGui")
+	local timerGui = playerGui and playerGui:FindFirstChild("TimerGui")
+	statusLabel = timerGui and timerGui:FindFirstChild("StatusLabel")
+	return statusLabel
+end
+
+local function getOpenPosition()
+	local label = getStatusLabel()
+	local viewport = voteGui.AbsoluteSize
+	if not label or viewport.Y <= 0 then
+		return UDim2.new(0.5, 0, FALLBACK_Y, 0)
+	end
+
+	-- Label space is physical-top based; ours starts below the inset.
+	local labelBottom = label.AbsolutePosition.Y + label.AbsoluteSize.Y
+	local y = labelBottom - GuiService:GetGuiInset().Y + (VOTE_GAP_SCALE * viewport.Y)
+	return UDim2.new(0.5, 0, 0, math.max(y, 0))
+end
+
 local function setVoteVisible(isVisible)
 	if isVisible then
 		UIHelpers.animatePanelOpen(voteFrame, {
 			startPos = UDim2.new(0.5, 0, -0.02, 0),
-			center = UDim2.new(0.5, 0, 0.018, 0),
+			center = getOpenPosition(),
 			duration = 0.35,
 		})
 	else
@@ -54,6 +96,13 @@ local function setVoteVisible(isVisible)
 		})
 	end
 end
+
+-- Re-seat it if the window or safe area changes while the panel is open.
+voteGui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+	if voteFrame.Visible then
+		voteFrame.Position = getOpenPosition()
+	end
+end)
 
 local function refreshCounts()
 	for _, col in ipairs(getOptionColumns()) do
@@ -117,6 +166,7 @@ local function castVote(modeId)
 	myVote = modeId
 	counts[modeId] = (counts[modeId] or 0) + 1
 	refreshCounts()
+	Audio.play("VoteCast")
 	voteModeEvent:FireServer(modeId)
 end
 
@@ -148,6 +198,9 @@ end)
 for _, col in ipairs(getOptionColumns()) do
 	local btn = col:FindFirstChild("Button")
 	if btn then
+		-- castVote plays VoteCast; suppress the generic click so a vote is not
+		-- two overlapping sounds.
+		btn:SetAttribute("NoClickSound", true)
 		UIHelpers.bindButtonHover(btn)
 	end
 end

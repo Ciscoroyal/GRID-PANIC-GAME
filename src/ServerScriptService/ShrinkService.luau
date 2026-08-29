@@ -23,6 +23,51 @@ local originals = {} -- [BasePart] = { cf }
 local homeCFrames = {} -- persistent spawn CFrames for full grid reset
 local activeTweens = {} -- [BasePart] = { Tween }
 local arenaBaseState = nil -- { transparency, canCollide, canQuery }
+--[[
+	The 3D "ARENA" lettering is mounted on the side of the base slab. Hiding the
+	slab on its own left the letters floating in mid-air over the void for the
+	rest of the match, so they come and go with it.
+]]
+local arenaTextState = nil -- [BasePart] = transparency
+
+local function getArenaText()
+	local env = workspace:FindFirstChild("Environment")
+	if not env then
+		return nil
+	end
+	return env:FindFirstChild("Arena 3d Text")
+end
+
+local function setArenaTextVisible(visible)
+	local model = getArenaText()
+	if not model then
+		return
+	end
+
+	if visible then
+		if arenaTextState then
+			for part, transparency in pairs(arenaTextState) do
+				if part.Parent then
+					part.Transparency = transparency
+				end
+			end
+			arenaTextState = nil
+		end
+		return
+	end
+
+	if arenaTextState then
+		return -- already hidden; do not overwrite the saved look with 1s
+	end
+
+	arenaTextState = {}
+	for _, part in ipairs(model:GetDescendants()) do
+		if part:IsA("BasePart") then
+			arenaTextState[part] = part.Transparency
+			part.Transparency = 1
+		end
+	end
+end
 
 local function getArenaBase()
 	local env = workspace:FindFirstChild("Environment")
@@ -41,6 +86,7 @@ local function setArenaBaseVisible(visible)
 	if not base then
 		return
 	end
+
 	if visible then
 		if arenaBaseState then
 			base.Transparency = arenaBaseState.transparency
@@ -65,6 +111,15 @@ local function setArenaBaseVisible(visible)
 		base.CanCollide = false
 		base.CanQuery = false
 	end
+end
+
+--[[
+	The base and its lettering are one object as far as players are concerned, so
+	they are always shown and hidden together.
+]]
+local function setArenaVisible(visible)
+	setArenaBaseVisible(visible)
+	setArenaTextVisible(visible)
 end
 
 local function cancelTileTweens(tile)
@@ -190,7 +245,7 @@ function ShrinkService.restoreAll()
 
 	table.clear(fallenTiles)
 	table.clear(originals)
-	setArenaBaseVisible(true)
+	setArenaVisible(true)
 	pcall(function()
 		shrinkTileEvent:FireAllClients("Clear", nil, 0)
 	end)
@@ -296,7 +351,7 @@ function ShrinkService.start(tiles)
 		end
 	end
 
-	setArenaBaseVisible(false)
+	setArenaVisible(false)
 
 	active = true
 	runToken += 1

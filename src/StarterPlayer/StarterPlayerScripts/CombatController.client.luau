@@ -10,6 +10,7 @@ local localPlayer = Players.LocalPlayer
 PlayerSettings.ensure(localPlayer)
 local useAbilityEvent = ReplicatedStorage:WaitForChild("UseAbilityEvent")
 local UIHelpers = require(ReplicatedStorage:WaitForChild("UIHelpers"))
+local AbilityData = require(ReplicatedStorage:WaitForChild("AbilityData"))
 
 local gameAssets = ReplicatedStorage:FindFirstChild("GameAssets")
 local swooshTemplate = gameAssets and gameAssets:FindFirstChild("Sounds") and gameAssets.Sounds:FindFirstChild("DashSwoosh")
@@ -157,12 +158,25 @@ local function getActiveAbility()
 	if getCurrentModeId() == "PunchOut" then
 		return "Grid Punch"
 	end
-	return localPlayer:GetAttribute("EquippedAbility")
+	-- The juggernaut is fists-only; mirror the server's rule so the client does
+	-- not fire a request that would just be rewritten.
+	if getCurrentModeId() == "Juggernaut" and localPlayer:GetAttribute("IsJuggernaut") == true then
+		return "Grid Punch"
+	end
+	local equipped = localPlayer:GetAttribute("EquippedAbility")
+	-- A disabled ability should never be usable, even if it is still equipped
+	-- from a previous session.
+	if type(equipped) == "string" and not AbilityData.isEnabled(equipped) then
+		return AbilityData.getDefaultAbility()
+	end
+	return equipped
 end
 
 local function triggerAbility()
 	if localPlayer:GetAttribute("InArena") ~= true then return end
 	if localPlayer:GetAttribute("IsEliminated") == true then return end
+	-- Pre-match countdown: abilities are locked until GO.
+	if localPlayer:GetAttribute("MatchLocked") == true then return end
 	if not abilitiesAllowed() then return end
 
 	local equippedAbility = getActiveAbility()
@@ -177,6 +191,20 @@ local function triggerAbility()
 
 	lastUseTime = currentTime
 	local previousCooldownEnd = localPlayer:GetAttribute("AbilityCooldownEnd")
+
+	--[[
+		Play our own swing immediately instead of waiting for the server to
+		broadcast it back. The animation used to arrive a full round trip after
+		the button press, which is what made the punch feel sluggish - the hit
+		itself was always applied on the first server frame.
+
+		The server still broadcasts to everyone; CombatAnimController ignores the
+		echo for us so the clip does not restart mid-swing.
+	]]
+	local localAnim = ReplicatedStorage:FindFirstChild("LocalCombatAnim")
+	if localAnim then
+		localAnim:Fire(equippedAbility)
+	end
 
 	useAbilityEvent:FireServer(equippedAbility)
 
@@ -197,6 +225,9 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 end)
 
 local function getAbilityButton(mobileGui)
+	if not mobileGui then
+		return nil
+	end
 	for _, child in ipairs(mobileGui:GetChildren()) do
 		if child.Name == "AbilityButton" and child:IsA("ImageButton") then
 			return child
@@ -234,16 +265,25 @@ local function getCooldownLabel(abilityButton)
 	return cooldownLabel, abilityImage
 end
 
+--[[
+	The in-match button keeps its own artwork rather than showing the equipped
+	ability's icon. The ability icon belongs in the loadout, where you are
+	choosing between them; on the HUD it just needs to read as "the ability
+	button", the same way the dash button always looks like the dash button.
+
+	The design image is captured from the button as authored, so re-arting it in
+	Studio needs no code change.
+]]
+local abilityButtonArt = nil
+
 local function refreshEquippedAbilityIcon(abilityImage)
 	if not abilityImage then
 		return
 	end
-	local abilityName = getActiveAbility()
-	if abilityName and abilityName ~= "None" then
-		UIHelpers.setAbilityImage(abilityImage, abilityName)
-	else
-		abilityImage.Image = ""
+	if abilityButtonArt == nil then
+		abilityButtonArt = abilityImage.Image
 	end
+	abilityImage.Image = abilityButtonArt
 	abilityImage.Visible = true
 end
 
@@ -361,6 +401,10 @@ if existingMobileGui then
 	bindMobileAbilityButton(existingMobileGui)
 else
 	task.spawn(function()
-		bindMobileAbilityButton(playerGui:WaitForChild("MobileGui", 10))
+		-- WaitForChild returns nil on timeout (desktop has no MobileGui).
+		local mobileGui = playerGui:WaitForChild("MobileGui", 10)
+		if mobileGui then
+			bindMobileAbilityButton(mobileGui)
+		end
 	end)
 end

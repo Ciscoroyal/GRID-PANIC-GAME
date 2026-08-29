@@ -34,9 +34,21 @@ local function isValidOption(modeId)
 	return false
 end
 
+--[[
+	The poll stays open through the whole match so players sitting in the lobby
+	have the entire round to decide. The panel only pops open for people who are
+	not currently fighting - contestants would rather not have it over the arena.
+]]
+local function shouldShowPanel(player)
+	if not active then
+		return false
+	end
+	return player:GetAttribute("InArena") ~= true
+end
+
 local function buildStateFor(player)
 	return {
-		visible = active,
+		visible = shouldShowPanel(player),
 		options = options,
 		counts = counts,
 		-- Use "" instead of nil so remotes always deliver a clearable myVote
@@ -60,21 +72,29 @@ function VoteService.getWinner()
 	return winnerId
 end
 
+local sessionToken = 0
+
 --[[
-	Runs a vote for `duration` seconds. Returns winning mode id.
+	Opens a poll for the next round. Called as soon as a match starts, so it is
+	live for the whole match plus the following intermission.
 ]]
-function VoteService.runVote(duration)
-	duration = duration or 12
+function VoteService.open()
+	sessionToken += 1
 	active = true
 	winnerId = nil
 	table.clear(votes)
 	options = GameModeData.pickVoteOptions(2)
 	rebuildCounts()
 	broadcastState()
+end
 
-	local endsAt = os.clock() + duration
-	while os.clock() < endsAt do
-		task.wait(0.25)
+--[[
+	Resolves the poll and returns the winning mode id. Does not yield - the round
+	starts immediately after - so the result panel is hidden on a spawned timer.
+]]
+function VoteService.close()
+	if not active then
+		return winnerId
 	end
 
 	rebuildCounts()
@@ -101,17 +121,23 @@ function VoteService.runVote(duration)
 	active = false
 	broadcastState()
 
-	-- brief moment to show result, then hide
-	task.wait(1.5)
-	for _, player in ipairs(Players:GetPlayers()) do
-		voteStateEvent:FireClient(player, {
-			visible = false,
-			options = options,
-			counts = counts,
-			myVote = votes[player] or "",
-			winner = winnerId,
-		})
-	end
+	-- Brief moment to show the result, then hide - unless a new poll opened.
+	local token = sessionToken
+	task.spawn(function()
+		task.wait(1.5)
+		if token ~= sessionToken or active then
+			return
+		end
+		for _, player in ipairs(Players:GetPlayers()) do
+			voteStateEvent:FireClient(player, {
+				visible = false,
+				options = options,
+				counts = counts,
+				myVote = votes[player] or "",
+				winner = winnerId,
+			})
+		end
+	end)
 
 	return winnerId
 end
@@ -139,12 +165,29 @@ Players.PlayerRemoving:Connect(function(player)
 	end
 end)
 
+--[[
+	The panel follows arena state in both directions: it comes up the moment a
+	player returns to the lobby, and it is taken down the moment they are
+	teleported into a round - including while a finished poll is still showing
+	its result.
+]]
+local function watchArenaState(player)
+	player:GetAttributeChangedSignal("InArena"):Connect(function()
+		voteStateEvent:FireClient(player, buildStateFor(player))
+	end)
+end
+
 Players.PlayerAdded:Connect(function(player)
+	watchArenaState(player)
 	if active then
 		task.defer(function()
 			voteStateEvent:FireClient(player, buildStateFor(player))
 		end)
 	end
 end)
+
+for _, player in ipairs(Players:GetPlayers()) do
+	watchArenaState(player)
+end
 
 return VoteService

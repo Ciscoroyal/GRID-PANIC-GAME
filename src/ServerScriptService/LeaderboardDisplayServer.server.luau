@@ -170,6 +170,38 @@ local function getDisplayName(userId)
 	return name
 end
 
+--[[
+	Resolve a batch of names concurrently and wait for the lot.
+
+	GetNameFromUserIdAsync is a web call. Looking up three boards of ten one
+	after another meant up to thirty round trips in series on a cold cache,
+	which is why the boards took so long to come back. Fired together they cost
+	roughly one round trip in total.
+]]
+local function warmNames(userIds)
+	local pending = 0
+	local done = false
+	for _, userId in ipairs(userIds) do
+		if not nameCache[userId] then
+			pending += 1
+			task.spawn(function()
+				getDisplayName(userId)
+				pending -= 1
+				if pending <= 0 then
+					done = true
+				end
+			end)
+		end
+	end
+	if pending == 0 then
+		return
+	end
+	local deadline = os.clock() + 5
+	while not done and os.clock() < deadline do
+		task.wait(0.05)
+	end
+end
+
 local function clearList(list)
 	for _, child in ipairs(list:GetChildren()) do
 		if child:IsA("GuiObject") and child.Name ~= "Template" and not child:IsA("UILayout") and not child:IsA("UIPadding") then
@@ -188,6 +220,19 @@ local function renderBoard(boardKey, entries)
 	local template = list and list:FindFirstChild("Template")
 	if not list or not template then return end
 	template.Visible = false
+
+	--[[
+		These lists ship with CanvasSize (0,0) and AutomaticCanvasSize off, so the
+		canvas had no height and the boards could not be scrolled at all - any row
+		past the visible area was simply unreachable. Let the layout drive it.
+	]]
+	if list:IsA("ScrollingFrame") then
+		list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		list.CanvasSize = UDim2.new()
+		list.ScrollingDirection = Enum.ScrollingDirection.Y
+		list.ScrollingEnabled = true
+	end
+
 	clearList(list)
 	for _, entry in ipairs(entries) do
 		local row = template:Clone()
@@ -208,8 +253,93 @@ local function renderBoard(boardKey, entries)
 	end
 end
 
-local function refreshBoards()
-	local top = PlayerStatsService.getAllTop(10)
+--[[
+	Refreshes are serialised. A round ending while a previous refresh is still
+	waiting on DataStore reads used to start a second one on top of it, so the
+	boards could be rebuilt twice and the podium avatars torn down mid-build.
+]]
+local refreshBusy = false
+local refreshQueued = false
+
+--[[
+	Ten rows filled the board exactly, so the canvas matched the window and
+	there was nothing to scroll. Twenty-five gives the list somewhere to go and
+	makes the ladder worth climbing past tenth.
+]]
+local BOARD_ROWS = 25
+
+--[[
+	One shared read of the sorted boards.
+
+	Every client that opened the leaderboard UI used to trigger its own
+	getAllTop - three GetSortedAsync calls each - on top of the three the world
+	boards do at the end of every match. That is what filled the DataStore
+	queue ("request was added to queue" in the log) and made the boards take an
+	age to come back: the calls were not slow, they were waiting in line.
+
+	The standings only move when a match ends, so one read is cached and shared.
+	The match-end refresh clears it first so the boards are never stale where it
+	matters.
+]]
+local TOP_CACHE_SECONDS = 30
+local cachedTop = nil
+local cachedTopAt = 0
+local cachedTopRows = 0
+local topFetchBusy = false
+
+local function getTop(rows)
+	if cachedTop and cachedTopRows >= rows and (os.clock() - cachedTopAt) < TOP_CACHE_SECONDS then
+		return cachedTop
+	end
+
+	-- A fetch already in flight: wait for it instead of starting a second one.
+	if topFetchBusy then
+		local deadline = os.clock() + 10
+		while topFetchBusy and os.clock() < deadline do
+			task.wait(0.1)
+		end
+		if cachedTop and cachedTopRows >= rows then
+			return cachedTop
+		end
+	end
+
+	topFetchBusy = true
+	local ok, result = pcall(PlayerStatsService.getAllTop, rows)
+	topFetchBusy = false
+
+	if ok and type(result) == "table" then
+		cachedTop = result
+		cachedTopAt = os.clock()
+		cachedTopRows = rows
+		return result
+	end
+
+	-- A stale board beats an empty one.
+	return cachedTop
+end
+
+local function invalidateTop()
+	cachedTopAt = 0
+end
+
+local function doRefreshBoards()
+	-- This runs off the match-end event, so take a genuinely fresh read.
+	invalidateTop()
+	local top = getTop(BOARD_ROWS)
+	if not top then
+		return
+	end
+
+	-- Resolve every name on all three boards in one concurrent batch before
+	-- rendering, rather than one blocking call per row.
+	local ids = {}
+	for _, board in pairs(top) do
+		for _, entry in ipairs(board) do
+			table.insert(ids, entry.userId)
+		end
+	end
+	warmNames(ids)
+
 	renderBoard("Wins", top.Wins)
 	renderBoard("Fans", top.Fans)
 	renderBoard("Kills", top.Kills)
@@ -220,9 +350,39 @@ local function refreshBoards()
 	})
 end
 
+local function refreshBoards()
+	if refreshBusy then
+		refreshQueued = true
+		return
+	end
+	refreshBusy = true
+	task.spawn(function()
+		repeat
+			refreshQueued = false
+			local ok, err = pcall(doRefreshBoards)
+			if not ok then
+				warn("[Leaderboards] refresh failed:", err)
+			end
+		until not refreshQueued
+		refreshBusy = false
+	end)
+end
+
 local function buildClientPayload()
-	local payload = PlayerStatsService.getAllTop(25)
-	for boardKey, entries in pairs(payload) do
+	local payload = getTop(BOARD_ROWS)
+	if not payload then
+		return {}
+	end
+	-- Same concurrency fix: 75 sequential name lookups made this request feel
+	-- like the board had hung.
+	local ids = {}
+	for _, entries in pairs(payload) do
+		for _, entry in ipairs(entries) do
+			table.insert(ids, entry.userId)
+		end
+	end
+	warmNames(ids)
+	for _, entries in pairs(payload) do
 		for _, entry in ipairs(entries) do
 			entry.name = getDisplayName(entry.userId)
 		end
@@ -247,9 +407,17 @@ for _, player in ipairs(Players:GetPlayers()) do
 end
 
 
+--[[
+	Stats only move when a match ends, so the boards are driven by that event
+	(fired by HazardSpawner during the payout step). The poll below is just a
+	safety net for players joining mid-session - it used to run every 30s, which
+	rebuilt podium avatar models at arbitrary moments, including mid-match.
+]]
+local SAFETY_POLL_SECONDS = 180
+
 leaderboardRefreshEvent.Event:Connect(refreshBoards)
 refreshBoards()
 while true do
-	task.wait(30)
+	task.wait(SAFETY_POLL_SECONDS)
 	refreshBoards()
 end

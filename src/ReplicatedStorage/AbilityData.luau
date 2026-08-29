@@ -1,3 +1,8 @@
+--[[
+	Set Enabled = false to take an ability out of circulation. Disabled
+	abilities are hidden from the loadout and ability picker, cannot be bought
+	or equipped, and are rejected server-side if a request slips through.
+]]
 local AbilityData = {
 	["Grid Punch"] = {
 		ImageId = "rbxassetid://86703704591003", -- <== Add your uploaded Image IDs here!
@@ -11,7 +16,8 @@ local AbilityData = {
 		Description = "Dashing into an occupied tile punches the opponent out.",
 		Cooldown = 5,
 		Cost = 100,
-		Color = Color3.fromRGB(100, 255, 100)
+		Color = Color3.fromRGB(100, 255, 100),
+		Enabled = false
 	},
 	["Shield Bubble"] = {
 		ImageId = "rbxassetid://126356124209577",
@@ -32,9 +38,32 @@ local AbilityData = {
 		Description = "Ground slam that knocks all surrounding players away.",
 		Cooldown = 7.5,
 		Cost = 300,
-		Color = Color3.fromRGB(255, 255, 0)
+		Color = Color3.fromRGB(255, 255, 0),
+		Enabled = false
 	}
 }
+
+local DEFAULT_ABILITY = "Grid Punch"
+
+function AbilityData.isEnabled(abilityName)
+	local data = AbilityData[abilityName]
+	if type(data) ~= "table" then
+		return false
+	end
+	return data.Enabled ~= false
+end
+
+function AbilityData.getDefaultAbility()
+	if AbilityData.isEnabled(DEFAULT_ABILITY) then
+		return DEFAULT_ABILITY
+	end
+	for abilityName, data in pairs(AbilityData) do
+		if type(data) == "table" and data.Enabled ~= false then
+			return abilityName
+		end
+	end
+	return DEFAULT_ABILITY
+end
 
 function AbilityData.getOwnedAttributeKey(abilityName)
 	return "Own_" .. abilityName:gsub(" ", "_")

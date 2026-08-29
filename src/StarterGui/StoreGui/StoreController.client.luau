@@ -23,6 +23,21 @@ end
 
 local currentTab = "SHOP"
 
+--[[
+	Death effects are not shipping yet (auras first), so the crate is hidden
+	rather than removed - flip this back when the feature lands.
+]]
+local DEATH_CRATE_ENABLED = false
+if not DEATH_CRATE_ENABLED then
+	for _, frame in ipairs({ cratesFrame, storeFrame:FindFirstChild("SHOP"), storeFrame:FindFirstChild("Shop") }) do
+		local list = frame and frame:FindFirstChild("CrateFrame")
+		local deathCrate = list and list:FindFirstChild("DeathEffectCrate")
+		if deathCrate then
+			deathCrate.Visible = false
+		end
+	end
+end
+
 local function setTabHighlight(activeName)
 	for _, button in ipairs({ cratesBtn, shopBtn }) do
 		local active = button.Name == activeName

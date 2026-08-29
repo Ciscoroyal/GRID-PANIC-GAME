@@ -12,7 +12,7 @@ local RoundData = {
 
 RoundData.winningTeam = nil
 
-local JUGGERNAUT_SCALE = 1.35
+local JUGGERNAUT_SCALE = 1.55
 
 local function resetCharacterScale(player)
 	if not player or not player.Parent then

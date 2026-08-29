@@ -258,11 +258,22 @@ local function updateCurrentAbilityIcon()
 	end
 end
 
+--[[
+	CurrencyBurstController marks a counter "BurstOwned" when it is animating
+	the number up as the icons land. We must not snap the label to the new
+	total underneath it, or the number jumps ahead and then falls back.
+]]
 local function bindCurrency(frame, getValue)
 	local valueObject = getValue()
 	if valueObject then
+		if frame:GetAttribute("BurstOwned") == true then
+			return
+		end
 		setNestedTitle(frame, valueObject.Value)
 		valueObject:GetPropertyChangedSignal("Value"):Connect(function()
+			if frame:GetAttribute("BurstOwned") == true then
+				return
+			end
 			setNestedTitle(frame, valueObject.Value)
 		end)
 	end

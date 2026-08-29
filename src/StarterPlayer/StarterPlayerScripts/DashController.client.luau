@@ -15,6 +15,9 @@ local DASH_COOLDOWN = 0.75
 local DASH_DISTANCE = 15
 local DASH_DURATION = 0.45
 
+-- Forward declaration: performDash sits above the trail code that defines it.
+local playDashTrails
+
 local isDashing = false
 local lastDashTime = 0
 local dashFinishToken = 0
@@ -27,6 +30,10 @@ local dashTrack = nil
 
 local function canDash()
 	if player:GetAttribute("IsEliminated") == true then
+		return false
+	end
+	-- Pre-match countdown: no dashing until GO.
+	if player:GetAttribute("MatchLocked") == true then
 		return false
 	end
 	return true
@@ -112,30 +119,81 @@ local function cancelActiveDash()
 	end
 end
 
+--[[
+	States suppressed for the duration of a dash.
+	FallingDown / GettingUp / Ragdoll are the important ones: without them the
+	humanoid tips over when the dash slams into geometry and burns ~3 seconds
+	in the get-up animation before the player has control again.
+]]
+local DASH_SUPPRESSED_STATES = {
+	Enum.HumanoidStateType.Running,
+	Enum.HumanoidStateType.RunningNoPhysics,
+	Enum.HumanoidStateType.FallingDown,
+	Enum.HumanoidStateType.GettingUp,
+	Enum.HumanoidStateType.Ragdoll,
+	Enum.HumanoidStateType.PlatformStanding,
+}
+
+local function setDashStatesEnabled(humanoid, enabled)
+	if not humanoid or not humanoid.Parent then
+		return
+	end
+	for _, state in ipairs(DASH_SUPPRESSED_STATES) do
+		pcall(function()
+			humanoid:SetStateEnabled(state, enabled)
+		end)
+	end
+end
+
+local function getDefaultWalkSpeed()
+	local defaultSpeed = game:GetService("StarterPlayer").CharacterWalkSpeed
+	if typeof(defaultSpeed) ~= "number" or defaultSpeed <= 0 then
+		defaultSpeed = 16
+	end
+	return defaultSpeed
+end
+
 local function restoreHumanoidMovement(character)
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	if not humanoid then
 		return
 	end
 
-	local defaultSpeed = game:GetService("StarterPlayer").CharacterWalkSpeed
-	if typeof(defaultSpeed) ~= "number" or defaultSpeed <= 0 then
-		defaultSpeed = 16
-	end
-
-	humanoid.WalkSpeed = defaultSpeed
+	humanoid.WalkSpeed = getDefaultWalkSpeed()
 	humanoid.AutoRotate = true
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.Running, true)
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.RunningNoPhysics, true)
+	setDashStatesEnabled(humanoid, true)
 	pcall(function()
 		humanoid.PlatformStand = false
 		humanoid.Sit = false
 	end)
+
+	-- Nudge out of any transient state the dash left behind.
+	local state = humanoid:GetState()
+	if state == Enum.HumanoidStateType.FallingDown
+		or state == Enum.HumanoidStateType.Ragdoll
+		or state == Enum.HumanoidStateType.PlatformStanding
+	then
+		pcall(function()
+			humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end)
+	end
+end
+
+--[[
+	Published on the character so MovementWatchdog can tell a legitimate dash
+	freeze from a humanoid that got stuck in one.
+]]
+local function setDashingFlag(value)
+	local character = player.Character
+	if character then
+		character:SetAttribute("Dashing", value or nil)
+	end
 end
 
 local function resetDashState()
 	dashFinishToken += 1
 	isDashing = false
+	setDashingFlag(false)
 	cancelActiveDash()
 	stopDashAnimation()
 	local character = player.Character
@@ -210,6 +268,7 @@ local function performDash(directionVector)
 	cancelActiveDash()
 
 	isDashing = true
+	setDashingFlag(true)
 	lastDashTime = currentTime
 	local finishToken = dashFinishToken
 	refreshDashButton()
@@ -242,22 +301,8 @@ local function performDash(directionVector)
 		end
 	end
 
-	if PlayerSettings.isWorldVFXEnabled() and gameAssets and gameAssets:FindFirstChild("Particles") then
-		local dustTemplate = gameAssets.Particles:FindFirstChild("DashDust")
-		if dustTemplate then
-			local dustAnchor = Instance.new("Part")
-			dustAnchor.Size = Vector3.new(1, 1, 1)
-			dustAnchor.Transparency = 1
-			dustAnchor.Anchored = true
-			dustAnchor.CanCollide = false
-			dustAnchor.Position = rootPart.Position - Vector3.new(0, 2.5, 0)
-			dustAnchor.Parent = workspace
-
-			local dashDust = dustTemplate:Clone()
-			dashDust.Parent = dustAnchor
-			dashDust:Emit(15)
-			Debris:AddItem(dustAnchor, 1.5)
-		end
+	if PlayerSettings.isWorldVFXEnabled() then
+		playDashTrails(character)
 	end
 
 	local camera = workspace.CurrentCamera
@@ -273,10 +318,14 @@ local function performDash(directionVector)
 
 	local wasAutoRotate = humanoid.AutoRotate
 	local wasWalkSpeed = humanoid.WalkSpeed
+	-- Never restore a 0 walk speed (can happen if a dash starts during another
+	-- freeze) or the player is stuck standing still after the dash.
+	if typeof(wasWalkSpeed) ~= "number" or wasWalkSpeed <= 0 then
+		wasWalkSpeed = getDefaultWalkSpeed()
+	end
 	humanoid.AutoRotate = false
 	humanoid.WalkSpeed = 0
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.Running, false)
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.RunningNoPhysics, false)
+	setDashStatesEnabled(humanoid, false)
 
 	DashCollision.applyPhysicsDash(rootPart, dashVelocity, DASH_DISTANCE, DASH_DURATION)
 
@@ -300,14 +349,33 @@ local function performDash(directionVector)
 		if humanoid.Parent then
 			humanoid.AutoRotate = wasAutoRotate
 			humanoid.WalkSpeed = wasWalkSpeed
-			humanoid:SetStateEnabled(Enum.HumanoidStateType.Running, true)
-			humanoid:SetStateEnabled(Enum.HumanoidStateType.RunningNoPhysics, true)
+			setDashStatesEnabled(humanoid, true)
+
+			-- If the dash ended flat on the ground, put the humanoid straight back
+			-- into Running rather than letting it settle through a fall state.
+			local state = humanoid:GetState()
+			if state ~= Enum.HumanoidStateType.Jumping
+				and state ~= Enum.HumanoidStateType.Freefall
+				and state ~= Enum.HumanoidStateType.Dead
+			then
+				pcall(function()
+					humanoid:ChangeState(Enum.HumanoidStateType.Running)
+				end)
+			end
 		end
 
 		isDashing = false
+		setDashingFlag(false)
 	end
 
 	task.delay(DASH_DURATION, finishDash)
+
+	-- Watchdog: if anything swallowed finishDash, force the player back to normal.
+	task.delay(DASH_DURATION + 0.5, function()
+		if isDashing and finishToken == dashFinishToken then
+			resetDashState()
+		end
+	end)
 end
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
@@ -319,6 +387,32 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 end)
 
+--[[
+	Jump cancels an active dash. The dash holds Y velocity at 0, so without this
+	the jump impulse gets eaten by the constraint and the character plays a broken
+	mid-air clip before locking up. Cancelling first frees the humanoid; if the
+	jump was swallowed anyway we re-issue it on the next frame.
+]]
+UserInputService.JumpRequest:Connect(function()
+	if not isDashing then
+		return
+	end
+
+	resetDashState()
+
+	task.defer(function()
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if not humanoid or humanoid.Health <= 0 then
+			return
+		end
+		local state = humanoid:GetState()
+		if state == Enum.HumanoidStateType.Running or state == Enum.HumanoidStateType.RunningNoPhysics then
+			humanoid.Jump = true
+		end
+	end)
+end)
+
 local function getDashButton(mobileGui)
 	for _, child in ipairs(mobileGui:GetChildren()) do
 		if child.Name == "DashButton" and child:IsA("ImageButton") then
@@ -326,6 +420,85 @@ local function getDashButton(mobileGui)
 		end
 	end
 	return nil
+end
+
+--[[
+	Dash trails.
+
+	GameAssets.DashTrails holds one folder per limb, each with the two
+	attachments that limb's Trail spans plus the Trail itself. A dash clones
+	that set onto the matching limb of the character, lets it draw for the
+	length of the dash, then stops emitting and lets the existing streak fade
+	out on its own before cleaning up - killing the trail outright would snap
+	the streak out of the air mid-flight.
+]]
+local DASH_TRAIL_HOLD = 0.28
+local DASH_TRAIL_TAG = "DashTrailVFX"
+
+local function clearDashTrails(character)
+	if not character then
+		return
+	end
+	for _, d in ipairs(character:GetDescendants()) do
+		if d:GetAttribute(DASH_TRAIL_TAG) == true then
+			d:Destroy()
+		end
+	end
+end
+
+playDashTrails = function(character)
+	local assets = ReplicatedStorage:FindFirstChild("GameAssets")
+	local template = assets and assets:FindFirstChild("DashTrails")
+	if not template or not character then
+		return
+	end
+
+	-- A second dash before the first has faded would otherwise stack trails.
+	clearDashTrails(character)
+
+	local live = {}
+	for _, limbFolder in ipairs(template:GetChildren()) do
+		local limb = character:FindFirstChild(limbFolder.Name)
+		if limb and limb:IsA("BasePart") then
+			local sourceTrail = limbFolder:FindFirstChildOfClass("Trail")
+			local a0 = limbFolder:FindFirstChild("Attachment")
+			local a1 = limbFolder:FindFirstChild("Attachment1")
+			if sourceTrail and a0 and a1 then
+				local newA0 = a0:Clone()
+				local newA1 = a1:Clone()
+				newA0:SetAttribute(DASH_TRAIL_TAG, true)
+				newA1:SetAttribute(DASH_TRAIL_TAG, true)
+				newA0.Parent = limb
+				newA1.Parent = limb
+
+				local trail = sourceTrail:Clone()
+				trail.Attachment0 = newA0
+				trail.Attachment1 = newA1
+				trail.Enabled = true
+				trail:SetAttribute(DASH_TRAIL_TAG, true)
+				trail.Parent = limb
+				table.insert(live, trail)
+			end
+		end
+	end
+
+	if #live == 0 then
+		return
+	end
+
+	task.delay(DASH_TRAIL_HOLD, function()
+		local longest = 0
+		for _, trail in ipairs(live) do
+			if trail.Parent then
+				trail.Enabled = false
+				longest = math.max(longest, trail.Lifetime)
+			end
+		end
+		-- Wait out the tail so the streak fades instead of vanishing.
+		task.delay(longest + 0.1, function()
+			clearDashTrails(character)
+		end)
+	end)
 end
 
 local function getCooldownLabel(dashButton)

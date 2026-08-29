@@ -15,6 +15,7 @@ local practiceEvent = ReplicatedStorage:WaitForChild("PracticeEvent")
 local STYLE = {
 	RETURN = Color3.fromRGB(255, 120, 0),
 	AFK_ON = Color3.fromRGB(210, 60, 60),
+	AFK_PENDING = Color3.fromRGB(230, 160, 40),
 	FRIEND = Color3.fromRGB(60, 120, 255),
 }
 
@@ -30,9 +31,30 @@ end
 local practiceIdleColor = getIdleColor(practiceBtn)
 local afkIdleColor = getIdleColor(afkBtn)
 
-local isAFK = false
 local inPractice = false
 
+-- AFK state is owned by the server: pressing it mid-round queues it for the
+-- next one rather than flagging you immediately.
+local function isAfkOn()
+	return localPlayer:GetAttribute("IsAFK") == true
+end
+
+local function isAfkPending()
+	return localPlayer:GetAttribute("PendingAFK") == true
+end
+
+--[[
+	These buttons render their label twice: an outer black "Title" acting as the
+	drop shadow, with the coloured face "Title" nested inside it.
+
+	The old version wrote only to the inner label, so the shadow kept whatever
+	text was authored in Studio - RETURN was drawn over a shadow still reading
+	PRACTICE, and AFK ON over one reading "AFK: OFF". Write the whole stack.
+
+	The face must also draw above its own shadow. The AFK button had these
+	inverted (shadow ZIndex 2 over face ZIndex 1), which is why it looked muddier
+	than the Practice button.
+]]
 local function setButtonTitle(button, text)
 	button.Text = ""
 	local title = button:FindFirstChild("Title")
@@ -41,11 +63,14 @@ local function setButtonTitle(button, text)
 		return
 	end
 
-	local innerTitle = title:FindFirstChild("Title")
-	if innerTitle and innerTitle:IsA("TextLabel") then
-		innerTitle.Text = text
-	else
-		title.Text = text
+	local depth = 0
+	local label = title
+	while label and label:IsA("TextLabel") do
+		label.Text = text
+		-- Each nested layer sits one step in front of the one behind it.
+		label.ZIndex = 1 + depth
+		depth += 1
+		label = label:FindFirstChild("Title")
 	end
 end
 
@@ -70,9 +95,12 @@ local function updatePracticeButton()
 end
 
 local function updateAfkButton()
-	if isAFK then
+	if isAfkOn() then
 		setButtonTitle(afkBtn, "AFK ON")
 		setButtonColor(afkBtn, STYLE.AFK_ON)
+	elseif isAfkPending() then
+		setButtonTitle(afkBtn, "AFK NEXT ROUND")
+		setButtonColor(afkBtn, STYLE.AFK_PENDING)
 	else
 		setButtonTitle(afkBtn, "AFK OFF")
 		setButtonColor(afkBtn, afkIdleColor)
@@ -100,10 +128,12 @@ localPlayer:GetAttributeChangedSignal("InPractice"):Connect(function()
 end)
 
 afkBtn.MouseButton1Click:Connect(function()
-	isAFK = not isAFK
-	updateAfkButton()
-	afkEvent:FireServer(isAFK)
+	-- Toggling off cancels a queued request as well as an active one.
+	afkEvent:FireServer(not (isAfkOn() or isAfkPending()))
 end)
+
+localPlayer:GetAttributeChangedSignal("IsAFK"):Connect(updateAfkButton)
+localPlayer:GetAttributeChangedSignal("PendingAFK"):Connect(updateAfkButton)
 
 if friendBtn then
 	friendBtn.MouseButton1Click:Connect(function()

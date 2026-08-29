@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local UIHelpers = require(ReplicatedStorage:WaitForChild("UIHelpers"))
+local Audio = require(ReplicatedStorage:WaitForChild("Audio"))
 local AbilityData = require(ReplicatedStorage:WaitForChild("AbilityData"))
 local PurchaseAbilityVFXEvent = ReplicatedStorage:WaitForChild("PurchaseAbilityVFXEvent")
 local VFXEvent = ReplicatedStorage:WaitForChild("VFXEvent")
@@ -46,17 +47,31 @@ local PREVIEW_VFX_BY_ABILITY = {
 	["Shockwave"] = "HeavyShake",
 }
 
+--[[
+	Death effects are not in the game yet - auras are going in first - so the
+	DEATH tab is taken out of circulation here rather than deleted, so turning
+	it back on later is a one-line change.
+]]
+local DEATH_TAB_ENABLED = false
+
 local tabButtons = {
 	Ability = navigate:WaitForChild("Ability"),
 	DASH = navigate:WaitForChild("DASH"),
-	DEATH = navigate:WaitForChild("DEATH"),
 }
 
 local tabFrames = {
 	Ability = abilityFrame,
 	DASH = dashFrame,
-	DEATH = deathFrame,
 }
+
+local deathTabButton = navigate:WaitForChild("DEATH")
+if DEATH_TAB_ENABLED then
+	tabButtons.DEATH = deathTabButton
+	tabFrames.DEATH = deathFrame
+else
+	deathTabButton.Visible = false
+	deathFrame.Visible = false
+end
 
 local STYLE = {
 	ACCENT = Color3.fromRGB(0, 170, 85),
@@ -164,6 +179,16 @@ local function highlightVFXCard(paneName, variantName)
 	for _, card in ipairs(cards) do
 		local stroke = card:FindFirstChildOfClass("UIStroke")
 		if stroke then
+			--[[
+				This was the orange flood filling the right-hand pane.
+
+				The selected card is marked with a gold UIStroke. In
+				ApplyStrokeMode.Border, on a button that clips its descendants and
+				carries a UICorner, the engine fills the clip region with the stroke
+				colour instead of drawing an outline - so "selected" painted the
+				whole pane gold. Contextual draws the outline properly.
+			]]
+			stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
 			local cardVariant = getVFXVariantName(card)
 			if cardVariant == variantName then
 				stroke.Color = STYLE.GOLD
@@ -190,6 +215,8 @@ local function showRightPaneForAbility(abilityName)
 	end
 end
 
+-- Selected cards keep their coloured highlight; unselected ones show no
+-- outline at all, since the ability artwork already has its own border.
 local function highlightAbilityCard(abilityName)
 	for name, card in pairs(abilityCards) do
 		local stroke = card:FindFirstChildOfClass("UIStroke")
@@ -199,8 +226,7 @@ local function highlightAbilityCard(abilityName)
 				stroke.Color = (data and data.Color) or STYLE.GOLD
 				stroke.Thickness = 3
 			else
-				stroke.Color = Color3.fromRGB(0, 0, 0)
-				stroke.Thickness = 1.5
+				stroke.Thickness = 0
 			end
 		end
 	end
@@ -222,11 +248,13 @@ local function equipSelectedVFX(abilityName, vfxCard)
 		price = 0
 	end
 	local ownedKey = "OwnVFX_" .. abilityName:gsub(" ", "_") .. "_" .. variantName:gsub(" ", "_")
+	local wasUnowned = localPlayer:GetAttribute(ownedKey) ~= true
 
-	if price > 0 and localPlayer:GetAttribute(ownedKey) ~= true then
+	if price > 0 and wasUnowned then
 		local leaderstats = localPlayer:FindFirstChild("leaderstats")
 		local coins = leaderstats and leaderstats:FindFirstChild("Coins")
 		if not coins or coins.Value < price then
+			Audio.play("PurchaseDenied")
 			showToast("Not enough coins!")
 			return false
 		end
@@ -250,6 +278,11 @@ local function equipSelectedVFX(abilityName, vfxCard)
 
 	local equipped = localPlayer:GetAttribute(equippedKey)
 	if equipped == variantName then
+		-- Only a spend gets the chime; re-equipping something already owned keeps
+		-- the plain click.
+		if price > 0 and wasUnowned then
+			Audio.play("Purchase")
+		end
 		selectedVFXByAbility[abilityName] = variantName
 		local paneName = RIGHT_PANE_BY_ABILITY[abilityName]
 		if paneName then
@@ -307,7 +340,14 @@ local function bindVFXCards()
 		local pane = abilityFrame:FindFirstChild(paneName)
 		if not pane then continue end
 
-		pane.BackgroundTransparency = 1
+		--[[
+			This used to be forced fully transparent, which let whatever happened
+			to sit behind the panel bleed through as a solid block under the VFX
+			card. Match the left-hand ability pane instead so both halves of the
+			tab read as the same surface.
+		]]
+		pane.BackgroundColor3 = Color3.new(0, 0, 0)
+		pane.BackgroundTransparency = 0.85
 
 		local cards = {}
 		for _, child in ipairs(pane:GetChildren()) do
@@ -368,6 +408,8 @@ local function buildAbilityGrid()
 
 	for abilityName, data in pairs(AbilityData) do
 		if type(data) ~= "table" then continue end
+		-- Disabled abilities are not offered at all.
+		if not AbilityData.isEnabled(abilityName) then continue end
 
 		local card = template:Clone()
 		card.Name = abilityName
@@ -449,8 +491,8 @@ setupNavigate()
 buildAbilityGrid()
 
 local preferred = localPlayer:GetAttribute("EquippedAbility")
-if type(preferred) ~= "string" or not AbilityData[preferred] then
-	preferred = "Grid Punch"
+if type(preferred) ~= "string" or not AbilityData.isEnabled(preferred) then
+	preferred = AbilityData.getDefaultAbility()
 end
 selectAbility(preferred)
 

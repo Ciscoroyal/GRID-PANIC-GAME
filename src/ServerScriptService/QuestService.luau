@@ -71,17 +71,48 @@ local function normalizeState(data)
 		claimed = {},
 	}
 
-	for _, questId in ipairs(active) do
-		if QuestDefinitions.get(questId) then
+	--[[
+		Saved ids are mapped through resolveId first: the pool was rebuilt and a
+		player mid-day is still holding the old names. Without this they resolve
+		to nothing and silently vanish from the list.
+	]]
+	local seen = {}
+	for _, savedId in ipairs(active) do
+		local questId = QuestDefinitions.resolveId(savedId)
+		if questId and not seen[questId] then
+			seen[questId] = true
 			table.insert(state.active, questId)
-			state.progress[questId] = tonumber(data.progress and data.progress[questId]) or 0
-			state.claimed[questId] = data.claimed and data.claimed[questId] == true
+			-- Progress was stored under whichever name was current at the time.
+			local saved = data.progress and (data.progress[savedId] or data.progress[questId])
+			state.progress[questId] = tonumber(saved) or 0
+			state.claimed[questId] = data.claimed
+				and (data.claimed[savedId] == true or data.claimed[questId] == true)
 		end
 	end
 
 	if #state.active == 0 then
 		return blankState()
 	end
+
+	--[[
+		Top back up to the full daily count. Anything dropped above (a retired
+		quest, a corrupted entry) used to just shrink the list, which is why the
+		panel could show two tasks instead of three.
+	]]
+	if #state.active < QuestDefinitions.DAILY_COUNT then
+		for _, questId in ipairs(QuestDefinitions.pickForDay(today, QuestDefinitions.DAILY_COUNT)) do
+			if #state.active >= QuestDefinitions.DAILY_COUNT then
+				break
+			end
+			if not seen[questId] and QuestDefinitions.get(questId) then
+				seen[questId] = true
+				table.insert(state.active, questId)
+				state.progress[questId] = 0
+				state.claimed[questId] = false
+			end
+		end
+	end
+
 	return state
 end
 
@@ -189,6 +220,16 @@ end
 
 function QuestService.onMatchPlayed(player)
 	incrementType(player, "Play", 1, false)
+end
+
+-- Landing a Grid Punch on another player (not swinging at air).
+function QuestService.onPunchLanded(player)
+	incrementType(player, "Punch", 1, false)
+end
+
+-- Placing a Proximity Mine that actually made it onto the ground.
+function QuestService.onMinePlaced(player)
+	incrementType(player, "Mine", 1, false)
 end
 
 function QuestService.onWin(player)
